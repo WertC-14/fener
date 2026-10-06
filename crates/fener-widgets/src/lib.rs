@@ -316,7 +316,7 @@ fn draw_status(buf: &mut Buffer, area: Rect, editor: &Editor) {
     let name = editor
         .doc
         .path()
-        .map_or_else(|| "[No Name]".to_string(), |p| p.display().to_string());
+        .map_or_else(|| "[No Name]".to_string(), |p| editor.display_path(p));
     let modified = if editor.doc.is_modified() { " ●" } else { "" };
     let left = Line::from(vec![
         Span::styled(
