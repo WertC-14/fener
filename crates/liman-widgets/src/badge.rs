@@ -1,0 +1,96 @@
+//! One-line type badge for the detailed view (ADR 0003): ` PDF `, ` RS `, ` ▸ ` for folders.
+
+use liman_core::Entry;
+use liman_core::i18n::{tr, trf};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Span;
+
+use crate::symbols;
+
+/// Badge width in cells, including padding.
+pub const WIDTH: u16 = 6;
+
+/// Short label: the extension in upper case (max 4 chars), a symbol for well-known folders
+/// (`↓` Downloads, `♪` Music), `▸` for other folders, `·` without extension.
+pub fn label(entry: &Entry) -> String {
+    if let Some(kind) = entry.special {
+        return symbols::special_dir(kind).into();
+    }
+    if entry.is_dir {
+        return "▸".into();
+    }
+    entry
+        .extension()
+        .map_or_else(|| "·".into(), extension_label)
+}
+
+/// An extension as a badge: upper case, at most 4 characters (`PDF`, `RS`, `JSON`).
+pub fn extension_label(ext: &str) -> String {
+    ext.chars().take(4).collect::<String>().to_uppercase()
+}
+
+/// The type in words, for the Type column and the preview: "PDF file", "Folder", "File".
+pub fn type_label(extension: Option<&str>, is_dir: bool) -> String {
+    if is_dir {
+        return tr("Folder").into();
+    }
+    match extension.filter(|e| !e.is_empty()) {
+        Some(ext) => trf(
+            "{} file",
+            &[&ext.chars().take(5).collect::<String>().to_uppercase()],
+        ),
+        None => tr("File").into(),
+    }
+}
+
+/// The label in the type color on the normal background. (A filled color block per row made a
+/// bright stripe down the list that tired the eyes.)
+pub fn badge(entry: &Entry) -> Span<'static> {
+    let text = format!("{:^width$}", label(entry), width = usize::from(WIDTH));
+    Span::styled(
+        text,
+        Style::new()
+            .fg(crate::theme::entry_color(entry))
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use liman_core::FileType;
+    use std::path::PathBuf;
+
+    fn entry(name: &str, is_dir: bool) -> Entry {
+        Entry {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir,
+            is_symlink: false,
+            special: None,
+            size: 0,
+            item_count: None,
+            contents: None,
+            modified: None,
+            file_type: FileType::from_path(&PathBuf::from(name), is_dir),
+        }
+    }
+
+    #[test]
+    fn labels() {
+        assert_eq!(label(&entry("Notes.pdf", false)), "PDF");
+        assert_eq!(label(&entry("main.rs", false)), "RS");
+        assert_eq!(label(&entry("a.markdown", false)), "MARK");
+        assert_eq!(label(&entry("Makefile", false)), "·");
+        assert_eq!(label(&entry("Projects", true)), "▸");
+        let mut downloads = entry("Downloads", true);
+        downloads.special = Some(liman_core::SpecialDir::Downloads);
+        assert_eq!(label(&downloads), "↓");
+    }
+
+    #[test]
+    fn badge_is_fixed_width() {
+        assert_eq!(badge(&entry("x.pdf", false)).width(), usize::from(WIDTH));
+        assert_eq!(badge(&entry("Music", true)).width(), usize::from(WIDTH));
+    }
+}

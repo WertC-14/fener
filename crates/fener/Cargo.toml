@@ -1,6 +1,6 @@
 [package]
 name = "fener"
-description = "A modal terminal editor in the spirit of LazyVim"
+description = "A file manager (a fork of liman) whose text files open in LazyVim-style editor tabs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+liman-core.workspace = true
+liman-widgets.workspace = true
 fener-core.workspace = true
 fener-widgets.workspace = true
+notify = { version = "8", default-features = false }
+portable-pty = "0.9"
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
+vt100 = "0.16"
 
 [lints]
 workspace = true

@@ -1,64 +1,62 @@
 # fener
 
-A modal terminal editor in the spirit of LazyVim, built with Rust and Ratatui.
-It starts small and grows one piece at a time; sister project of [liman](https://github.com/WertC-14/liman).
+A terminal file manager whose text files open in LazyVim-style editor tabs. Rust + Ratatui.
 
-**Status:** early development (v0.1 in progress).
+The first tab is always the file manager: a fork of [liman](https://github.com/WertC-14/liman), which stays a
+plain file manager of its own. Press Enter on a code, config or text file and it opens in a tab of its own, with the
+project's folder tree beside it. `Alt+1` is always back to the files.
 
-You do not need to know the keys to start: `fener` alone opens a start screen with a menu,
-`Space` shows what can follow (which-key), and `Space s k` (or `?` on the start screen) lists
-every key and runs the one you pick.
+**Status:** early development.
 
-![The start screen](docs/img/dashboard.png)
+![A code tab: the folder tree on the left, the editor on the right](docs/img/code-tab.png)
 ![Find Files: a fuzzy picker](docs/img/find-files.png)
 ![Keymaps: every key, searchable; Enter runs it](docs/img/keymaps.png)
-![The folder tree (Space e)](docs/img/tree.png)
-![fener: Visual mode, relative line numbers, lualine-like status line](docs/img/normal.png)
 ![The Space leader with its which-key box](docs/img/which-key.png)
 
-## What works
+## Code tabs
 
-- A start screen (LazyVim's dashboard): Find File `f`, New File `n`, Find Text `g`,
-  Recent Files `r`, Themes `t`, Keymaps `?`, Quit `q`
-- Pickers that narrow while you type (fuzzy, smart case): Find Files (`Space Space`, `Space f f`),
-  Recent Files (`Space f r`), Find Text / grep (`Space /`, `Space s g`), Keymaps (`Space s k`),
-  Colorschemes with live preview (`Space u C`): tokyonight night/storm/moon/day,
-  catppuccin-mocha, gruvbox
-- A folder tree on the left (`Space e`): the project the file is in (its git repository), the file
-  revealed; `Ctrl+H` / `Ctrl+L` between the tree and the text, `Enter`/`l` open, `h` close,
-  `Backspace` shows the folder above
-- Open, edit and save a file: `fener FILE`, `:e FILE`, `:w`, `:q`, `:wq`, `:x`, `:q!`, `Ctrl+S`
+You do not need to know the keys: `Space` shows what can follow (which-key), and `Space s k` lists every key and
+runs the one you pick.
+
+- Tabs: `Alt+1` the files, `Alt+2…9` the others, or click a tab; `:q` closes a code tab. Unsaved changes show a `●`
+  on the tab and are never dropped silently: `:q`, a middle click and quitting fener show that tab with a warning
+  (`:q!` drops them).
+- Folder tree on the left (`Space e`): the git repository around the file (else its folder), the file revealed;
+  `Ctrl+H` / `Ctrl+L` between tree and text, `Enter`/`l` open, `h` close, `Backspace` the folder above
+- Pickers that narrow while you type: Find Files (`Space Space`), Recent Files (`Space f r`), Find Text / grep
+  (`Space /`), Keymaps (`Space s k`)
 - Vim's language: `[count] [operator [count]] (motion | text object)`
   - motions: `h j k l`, `w W b B e E`, `0 ^ $`, `gg G` (`5G`), `f t F T ; ,`, `{ }`, `%`, `n N`, `*`
   - operators: `d c y > <` (`dd cc yy >> <<`), text objects `iw aw iW aW i" a" i' i( a( i[ i{ i<` ...
   - `x X s S D C Y p P J r ~ u Ctrl+R .`, Insert (`i a I A o O`), Visual (`v V`)
-- Search `/` `?` with smart case, highlighted matches, `:noh`
-- `Space` leader with a which-key box (LazyVim's keys: `Space q q` quit, `Space u l` line numbers ...)
-- Recent files and the theme are remembered in `~/.local/state/fener/`
-- Nerd Font icons (as LazyVim); `FENER_ICONS=plain` turns them off
-- LazyVim's look: tokyonight colors, relative line numbers, cursor line, a lualine-like status line
+- Search `/` `?` with smart case, `:w`, `:e FILE`, `Ctrl+S`
+- Colors follow the file manager's theme
+
+The file manager itself is liman's: grid / normal / detailed views, Places, preview, built-in terminal, git panel,
+tabs, themes. Its guide: [liman's KILAVUZ](https://github.com/WertC-14/liman/blob/main/docs/KILAVUZ.md).
+Settings are shared with liman (`~/.config/liman/config`).
 
 ## Not yet (on purpose)
 
-LSP, tree-sitter, plugins, multiple buffers and windows, a config file, Obsidian vault.
+LSP, tree-sitter, plugins, split windows, a config file for the editor, Obsidian vault.
 Find Files does not read `.gitignore` yet (hidden folders, `target`, `node_modules` are skipped).
-They come one by one; see fm-research ADR 0010.
 
 ## Build
 
 ```bash
 cargo install --path crates/fener
-fener notes.md
+fener                # the current folder
+fener src/main.rs    # its folder, and the file in a code tab
 ```
 
 ## Layout
 
-- `crates/fener-core` — no terminal code: the document (rope + change record + undo), Vim motions and text
-  objects, the editor state machine, the command table, pickers, fuzzy matching, file walk and grep.
-- `crates/fener-widgets` — Ratatui drawing (text, status line, which-key, pickers); the theme is passed in,
-  so other apps (liman's code tabs) can embed an editor.
-- `crates/fener` — the terminal app.
+- `crates/fener-core` — the editor without terminal code: document (rope + change record + undo), Vim motions and
+  text objects, modes, the command table, pickers, fuzzy matching, file walk and grep, the folder tree.
+- `crates/fener-widgets` — Ratatui drawing of an editor; the theme is passed in.
+- `crates/liman-core`, `crates/liman-widgets` — forked from liman.
+- `crates/fener` — the app: liman's file manager plus code tabs (`src/app/code_tabs.rs`).
 
 ## License
 
-MIT.
+MIT. The file manager parts come from liman (MIT, same author).

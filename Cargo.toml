@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/fener-core", "crates/fener-widgets", "crates/fener"]
+members = [
+    "crates/fener-core",
+    "crates/fener-widgets",
+    "crates/liman-core",
+    "crates/liman-widgets",
+    "crates/fener",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +18,9 @@ repository = "https://github.com/WertC-14/fener"
 [workspace.dependencies]
 fener-core = { path = "crates/fener-core", version = "0.1.0" }
 fener-widgets = { path = "crates/fener-widgets", version = "0.1.0" }
+# Forked from liman (github.com/WertC-14/liman), which stays as it is.
+liman-core = { path = "crates/liman-core" }
+liman-widgets = { path = "crates/liman-widgets" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

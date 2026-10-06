@@ -1,47 +1,45 @@
-//! fener: a modal terminal editor in the spirit of LazyVim.
-//!
-//! The terminal setup and the event loop follow liman's (fm-research ADR 0010): an input thread
-//! sends events over a channel, the main loop draws only when something changed, inside a
-//! synchronized update so the terminal never shows half a frame. Slow work (listing and
-//! searching files for the pickers) runs on worker threads and comes back on the same channel.
+//! fener: liman's file manager in the first tab, text files in LazyVim-style editor tabs.
+//! The file manager is a fork of liman (github.com/WertC-14/liman), which stays as it is;
+//! the editor is `fener-core` + `fener-widgets` (fm-research ADR 0012).
+
+mod app;
+mod event;
+mod open;
+mod terminal;
+mod tui;
+mod ui;
+mod watch;
+mod worker;
 
 use std::io::{self, stdout};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
-use std::thread;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use fener_core::picker::{self, Item, Kind};
-use fener_core::{Document, Editor, Key, Mode, Request, State, files};
-use fener_widgets::{THEMES, View};
+use liman_core::Places;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 
-const HELP: &str = "fener: a modal terminal editor in the spirit of LazyVim
+use app::App;
+use tui::Tui;
 
-Usage: fener             the start screen (find, recent and new files, themes, keys)
-       fener FILE        edit FILE (a new file is created on :w)
-       fener --version
+const HELP: &str = "fener: a file manager whose text files open in editor tabs
 
-Space opens the command menu; Space s k (or ? on the start screen) lists every key.
-FENER_ICONS=plain turns off the Nerd Font icons.";
+Usage: fener            the current folder
+       fener FOLDER     that folder
+       fener FILE       its folder, and the file in an editor tab
+       fener --version  print the version
 
-/// Most files listed for Find Files, and most lines Find Text shows.
-const MAX_FILES: usize = 100_000;
-const MAX_HITS: usize = 2_000;
+Inside: ? shows all keys, Ctrl+P all commands. In an editor tab: Space for the command menu,
+Space s k for every key, Alt+1 back to the files.
+Config (shared with liman): ~/.config/liman/config (theme, lang = tr | en, colors = truecolor | 256, icons = nerd | unicode, images = auto | halfblocks, hidden, sort, preview)";
 
-enum Msg {
-    Term(Event),
-    /// A picker's list from a worker: the picker kind, the query it is for, the items.
-    Items(Kind, String, Vec<Item>),
-}
+/// Shortest time between two frames (~60 per second).
+const FRAME: Duration = Duration::from_millis(16);
 
 fn main() -> io::Result<()> {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
+    match std::env::args().nth(1).as_deref() {
         Some("--version" | "-V") => {
             println!("fener {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -52,154 +50,136 @@ fn main() -> io::Result<()> {
         }
         _ => {}
     }
-    let doc = match &arg {
-        Some(path) => Document::open(&PathBuf::from(path))?,
-        None => Document::new(""),
-    };
-    let mut editor = Editor::new(doc);
-    editor.root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    editor.state = State::load();
-    editor.themes = THEMES.iter().map(|t| t.name).collect();
-    if let Some(name) = &editor.state.theme {
-        editor.theme = THEMES.iter().position(|t| t.name == name).unwrap_or(0);
-    }
-    match &arg {
-        Some(path) => editor.remember(Path::new(path)),
-        None => editor.dashboard = Some(0),
-    }
-    let mut view = View::default();
-
-    let mut terminal = ratatui::try_init()?;
+    let mut tui = Tui::new()?;
     let (tx, rx) = mpsc::channel();
-    let input = tx.clone();
-    thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if input.send(Msg::Term(ev)).is_err() {
-                break;
-            }
-        }
-    });
-    // Bumped by each new worker job; a job that sees it change stops (its result is stale).
-    let generation = Arc::new(AtomicU64::new(0));
+    let input = Arc::new(event::InputGate::default());
+    event::spawn_input_thread(tx.clone(), input.clone());
 
-    let mut dirty = true;
-    let mut shape = None;
-    let result = loop {
-        if dirty {
-            execute!(stdout(), BeginSynchronizedUpdate)?;
-            // A bar cursor in Insert mode and on the command line, a block elsewhere. Sent
-            // before the frame, so a terminal that prints the sequence has it drawn over.
-            let bar = matches!(editor.mode, Mode::Insert | Mode::Command | Mode::Search);
-            if shape != Some(bar) {
-                let style = if bar {
-                    SetCursorStyle::SteadyBar
-                } else {
-                    SetCursorStyle::SteadyBlock
-                };
-                execute!(stdout(), style)?;
-                shape = Some(bar);
-            }
-            let drawn = terminal.draw(|frame| {
-                let area = frame.area();
-                let theme = &THEMES[editor.theme.min(THEMES.len() - 1)];
-                if let Some((x, y)) =
-                    fener_widgets::render(frame.buffer_mut(), area, &mut editor, &mut view, theme)
-                {
-                    frame.set_cursor_position((x, y));
-                }
-            });
-            execute!(stdout(), EndSynchronizedUpdate)?;
-            drawn?;
-            dirty = false;
-        }
-        let Ok(first) = rx.recv() else {
-            break Ok(());
-        };
-        // Drain what queued up meanwhile: a paste or key repeat costs one frame.
-        for msg in std::iter::once(first).chain(rx.try_iter()) {
-            match msg {
-                Msg::Term(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                    if let Some(key) = convert(key) {
-                        editor.handle_key(key);
-                        dirty = true;
-                    }
-                }
-                Msg::Term(Event::Paste(text)) => {
-                    for c in text.chars() {
-                        editor.handle_key(if c == '\n' { Key::Enter } else { Key::Char(c) });
-                    }
-                    dirty = true;
-                }
-                Msg::Term(Event::Resize(..)) => dirty = true,
-                Msg::Term(_) => {}
-                Msg::Items(kind, query, items) => {
-                    editor.receive(kind, &query, items);
-                    dirty = true;
-                }
-            }
-            for request in std::mem::take(&mut editor.requests) {
-                start(request, &editor, &tx, &generation);
-            }
-        }
-        if editor.quit {
-            break Ok(());
-        }
+    // `fener FILE` starts in the file's folder and opens it; `fener FOLDER` starts there.
+    let arg = std::env::args_os().nth(1).map(PathBuf::from);
+    let here = std::env::current_dir()?;
+    let arg = arg.map(|p| here.join(p));
+    let (cwd, file) = match arg {
+        Some(p) if p.is_dir() => (p, None),
+        Some(p) => (p.parent().map_or(here.clone(), PathBuf::from), Some(p)),
+        None => (here, None),
     };
-    let _ = execute!(stdout(), SetCursorStyle::DefaultUserShape);
-    ratatui::restore();
-    result
-}
-
-/// Does what the editor asked for: state is written here, lists are made on a worker.
-fn start(request: Request, editor: &Editor, tx: &Sender<Msg>, generation: &Arc<AtomicU64>) {
-    if request == Request::SaveState {
-        // Remembering is a convenience: a read-only home folder must not stop editing.
-        let _ = editor.state.save();
-        return;
+    let home = std::env::var_os("HOME").map_or_else(|| cwd.clone(), PathBuf::from);
+    let settings = liman_core::config::load(&liman_core::config::path(&home));
+    if let Some(theme) = settings.get("theme") {
+        liman_widgets::theme::set_by_name(theme);
     }
-    let root = editor.root.clone();
-    let tx = tx.clone();
-    let mine = generation.fetch_add(1, Ordering::Relaxed) + 1;
-    let generation = Arc::clone(generation);
-    let cancel = move || generation.load(Ordering::Relaxed) != mine;
-    match request {
-        Request::SaveState => {}
-        Request::ListFiles => {
-            thread::spawn(move || {
-                let paths = files::list(&root, MAX_FILES, &cancel);
-                let items = picker::file_items(&root, paths);
-                let _ = tx.send(Msg::Items(Kind::Files, String::new(), items));
-            });
-        }
-        Request::Grep(query) => {
-            thread::spawn(move || {
-                let hits = files::grep(&root, &query, MAX_HITS, &cancel);
-                if !cancel() {
-                    let items = picker::grep_items(&root, hits);
-                    let _ = tx.send(Msg::Items(Kind::Grep, query, items));
+    // `lang = tr | en` in the config, otherwise the locale ($LC_ALL, $LC_MESSAGES, $LANG).
+    let lang = settings
+        .get("lang")
+        .and_then(|l| liman_core::i18n::parse(l))
+        .unwrap_or_else(|| liman_core::i18n::from_env(|v| std::env::var(v).ok()));
+    liman_core::i18n::set(lang);
+    // `colors = truecolor | 256` in the config overrides the guess.
+    let env = |name| std::env::var(name).ok();
+    let truecolor = match settings.get("colors").map(String::as_str) {
+        Some("truecolor" | "24bit") => true,
+        Some("256") => false,
+        _ => liman_widgets::colors::detect_truecolor(
+            env("COLORTERM").as_deref(),
+            env("TERM").as_deref(),
+            env("TERM_PROGRAM").as_deref(),
+        ),
+    };
+    liman_widgets::colors::set_truecolor(truecolor);
+    // `icons = nerd` when the terminal font is a Nerd Font; plain Unicode otherwise.
+    let nerd = settings.get("icons").is_some_and(|v| v == "nerd");
+    liman_widgets::icons::set_nerd(nerd);
+    fener_widgets::set_nerd(nerd);
+    let mut app = App::new(cwd, Places::detect(&home), tx);
+    app.apply_settings(&settings);
+    if let Some(file) = &file {
+        app.open_code_tab(file);
+    }
+    let mut last_draw: Option<Instant> = None;
+    let mut cursor_bar: Option<bool> = None;
+    while app.running {
+        // Draw only when something changed (dirty flag), never on a fixed tick, and at most
+        // once per FRAME: a shell printing thousands of chunks costs 60 frames a second.
+        let mut wait = None;
+        if app.dirty {
+            let since = last_draw.map_or(FRAME, |t| t.elapsed());
+            if since >= FRAME {
+                // A code tab in Insert mode wants a bar cursor; sent before the frame, so a
+                // terminal that prints the sequence has it drawn over.
+                let bar = app.code_cursor_bar();
+                if bar != cursor_bar {
+                    let style = match bar {
+                        Some(true) => SetCursorStyle::SteadyBar,
+                        Some(false) => SetCursorStyle::SteadyBlock,
+                        None => SetCursorStyle::DefaultUserShape,
+                    };
+                    execute!(stdout(), style)?;
+                    cursor_bar = bar;
                 }
-            });
+                tui.draw(|frame| ui::render(frame, &mut app))?;
+                app.dirty = false;
+                last_draw = Some(Instant::now());
+            } else {
+                wait = Some(FRAME - since);
+            }
+        }
+
+        // Block until the next event (or the next frame is due), then drain everything that
+        // queued up meanwhile, so a burst of events (e.g. fast scrolling) costs a single redraw.
+        let first = match wait {
+            None => match rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => break,
+            },
+            Some(timeout) => match rx.recv_timeout(timeout) {
+                Ok(ev) => ev,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+        };
+        app.handle(first);
+        while let Ok(next) = rx.try_recv() {
+            app.handle(next);
+        }
+
+        // The first image preview: ask the terminal which graphics protocol it speaks. The answer
+        // comes on stdin, so the input thread steps aside meanwhile (ADR 0009).
+        if app.preview.picker_wanted {
+            input.pause();
+            let picker = ratatui_image::picker::Picker::from_query_stdio()
+                .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+            input.resume();
+            // A terminal that does not know a query may print part of it: draw everything again.
+            tui.redraw_all()?;
+            app.set_picker(picker);
+        }
+        if let Some((program, path)) = app.external.take() {
+            run_external(&mut tui, &input, &program, &path, &mut app)?;
         }
     }
+    if cursor_bar.is_some() {
+        let _ = execute!(stdout(), SetCursorStyle::DefaultUserShape);
+    }
+    Ok(())
 }
 
-/// A terminal key event as fener's key (`None` for keys fener does not use).
-fn convert(key: KeyEvent) -> Option<Key> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    Some(match key.code {
-        KeyCode::Char(c) if ctrl => Key::Ctrl(c.to_ascii_lowercase()),
-        KeyCode::Char(c) => Key::Char(c),
-        KeyCode::Esc => Key::Esc,
-        KeyCode::Enter => Key::Enter,
-        KeyCode::Backspace => Key::Backspace,
-        KeyCode::Delete => Key::Delete,
-        KeyCode::Tab => Key::Tab,
-        KeyCode::Left => Key::Left,
-        KeyCode::Right => Key::Right,
-        KeyCode::Up => Key::Up,
-        KeyCode::Down => Key::Down,
-        KeyCode::Home => Key::Home,
-        KeyCode::End => Key::End,
-        _ => return None,
-    })
+/// Hands the terminal to `program` (e.g. `$EDITOR`) and takes it back afterwards.
+fn run_external(
+    tui: &mut Tui,
+    input: &event::InputGate,
+    program: &str,
+    path: &std::path::Path,
+    app: &mut App,
+) -> io::Result<()> {
+    input.pause();
+    tui.suspend()?;
+    let result = open::run_editor(program, path);
+    tui.resume()?;
+    input.resume();
+    if let Err(e) = result {
+        app.message = Some(liman_core::i18n::trf("Editor failed: {}", &[&e]));
+    }
+    app.dirty = true;
+    Ok(())
 }
