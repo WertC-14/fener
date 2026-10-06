@@ -3,7 +3,9 @@
 use std::io::{self, stdout};
 
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::event::{
+    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
@@ -26,11 +28,12 @@ impl Tui {
         // otherwise the shell receives mouse escape codes after a crash.
         let ratatui_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(stdout(), DisableMouseCapture);
+            let _ = execute!(stdout(), DisableMouseCapture, DisableFocusChange);
             ratatui_hook(info);
         }));
 
-        execute!(stdout(), EnableMouseCapture)?;
+        // Focus reports: coming back to the window (from a browser download) refreshes the folder.
+        execute!(stdout(), EnableMouseCapture, EnableFocusChange)?;
         Ok(Self { terminal })
     }
 
@@ -53,7 +56,7 @@ impl Tui {
 
     /// Gives the terminal back (normal screen, cooked mode) so another program can use it.
     pub fn suspend(&mut self) -> io::Result<()> {
-        execute!(stdout(), DisableMouseCapture)?;
+        execute!(stdout(), DisableMouseCapture, DisableFocusChange)?;
         ratatui::try_restore()
     }
 
@@ -69,7 +72,8 @@ impl Tui {
             stdout(),
             EnterAlternateScreen,
             Clear(ClearType::All),
-            EnableMouseCapture
+            EnableMouseCapture,
+            EnableFocusChange
         )?;
         self.terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         Ok(())
@@ -78,7 +82,7 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        let _ = execute!(stdout(), DisableMouseCapture);
+        let _ = execute!(stdout(), DisableMouseCapture, DisableFocusChange);
         ratatui::restore();
     }
 }

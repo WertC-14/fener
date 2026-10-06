@@ -760,4 +760,21 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a");
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn the_folder_time_check_catches_what_the_watcher_missed_and_names_it() {
+        let (dir, mut app, rx) = setup("tick");
+        app.message = None;
+        // A download lands; no watcher event is handled here, only the 2-second check.
+        fs::write(dir.join("indirilen.pdf"), "x").unwrap();
+        app.handle(AppEvent::Tick);
+        pump(&mut app, &rx, loaded);
+        assert!(app.visible_entries().any(|e| e.name == "indirilen.pdf"));
+        assert_eq!(app.message.as_deref(), Some("New: indirilen.pdf"));
+        // Nothing changed: the check does not read the folder again.
+        let generation = app.generation;
+        app.handle(AppEvent::Tick);
+        assert_eq!(app.generation, generation);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

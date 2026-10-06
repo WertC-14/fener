@@ -16,6 +16,8 @@ use ratatui::crossterm::event::{self, Event};
 #[derive(Debug)]
 pub enum AppEvent {
     Input(Event),
+    /// Every few seconds: the open folder's modification time is checked (see `watch.rs`).
+    Tick,
     /// A list a code tab's picker asked for (Find Files, grep), made on a worker.
     CodeItems {
         id: u64,

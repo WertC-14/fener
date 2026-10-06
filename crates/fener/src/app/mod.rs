@@ -10,6 +10,18 @@ mod terminal_mode;
 
 pub use actions::{Action, HELP, Menu};
 pub use code_tabs::CodeTabs;
+
+/// A file a browser is still downloading.
+fn is_partial_download(name: &str) -> bool {
+    [".part", ".crdownload", ".download", ".tmp"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
+/// A folder's modification time (changes when an entry is added, removed or renamed).
+fn folder_time(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
 pub use file_ops::{ClipMode, Clipboard, Dialog, JobStatus, RenameInput};
 pub use git_ops::GitPanel;
 pub use preview::{Graphic, PreviewKey, PreviewPane};
@@ -197,6 +209,12 @@ pub struct App {
     counts_sorted: Instant,
     /// When the newest listing was requested (it shows every change made before).
     listing_started: Instant,
+    /// The open folder's modification time when its listing was asked for; a different one
+    /// later means something was added, removed or renamed in it.
+    folder_time: Option<std::time::SystemTime>,
+    /// The last "New: …" message we showed, so a later reload may replace it (other messages
+    /// are left alone).
+    new_message: Option<String>,
     /// The listing on its way was started by following the shell (do not send `cd` back).
     load_from_shell: bool,
     trash_dir: PathBuf,
@@ -252,6 +270,8 @@ impl App {
             cwd_checked: Instant::now(),
             loading_path: None,
             listing_started: Instant::now(),
+            folder_time: None,
+            new_message: None,
             counts_sorted: Instant::now(),
             load_from_shell: false,
             list_area: Rect::default(),
@@ -310,6 +330,7 @@ impl App {
             .store(self.generation, std::sync::atomic::Ordering::Relaxed);
         self.loading_path = Some(self.tab.cwd.clone());
         self.listing_started = Instant::now();
+        self.folder_time = folder_time(&self.tab.cwd);
         worker::spawn_listing(
             self.tx.clone(),
             self.generation,
@@ -344,10 +365,24 @@ impl App {
         self.dirty = true;
         self.loading_path = Some(path.to_path_buf());
         self.listing_started = Instant::now();
+        self.folder_time = folder_time(path);
+    }
+
+    /// The safety net under the watcher: reads the folder again when its time changed (or
+    /// always, with `force`: the window got the focus back and sizes may have changed too).
+    fn check_folder(&mut self, force: bool) {
+        if self.loading_path.is_some() || self.tab.results.is_some() {
+            return;
+        }
+        if force || folder_time(&self.tab.cwd) != self.folder_time {
+            self.refresh();
+        }
     }
 
     pub fn handle(&mut self, event: AppEvent) {
         match event {
+            AppEvent::Tick => self.check_folder(false),
+            AppEvent::Input(Event::FocusGained) => self.check_folder(true),
             AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 if self.code.active.is_some() {
                     self.on_code_key(key);
@@ -1791,6 +1826,14 @@ impl App {
                 .collect(),
             _ => Default::default(),
         };
+        // A reload of the same folder: what is new gets named in the status line, so a file that
+        // arrives (a download) is seen even when the sort puts it in the middle.
+        let old_names: Option<std::collections::HashSet<String>> = match &self.tab.listing {
+            Listing::Ready(old) if path == self.tab.cwd && self.tab.results.is_none() => {
+                Some(old.iter().map(|e| e.name.clone()).collect())
+            }
+            _ => None,
+        };
         let mut to_count = Vec::new();
         self.tab.cwd = path;
         self.tab.listing = match result {
@@ -1819,6 +1862,24 @@ impl App {
             }
             Err(err) => Listing::Failed(err),
         };
+        let ours = self.message.is_none() || self.message == self.new_message;
+        if let (Some(old), Listing::Ready(entries), true) = (&old_names, &self.tab.listing, ours) {
+            // A download in progress (`.part`, `.crdownload`) is not news yet; its file is.
+            let new: Vec<&str> = entries
+                .iter()
+                .filter(|e| !old.contains(&e.name) && !is_partial_download(&e.name))
+                .map(|e| e.name.as_str())
+                .collect();
+            let note = match new.len() {
+                0 => None,
+                1..=3 => Some(trf("New: {}", &[&new.join(", ")])),
+                n => Some(trf("{} new items", &[&n])),
+            };
+            if note.is_some() {
+                self.message.clone_from(&note);
+                self.new_message = note;
+            }
+        }
         if let (Listing::Ready(entries), None) = (&self.tab.listing, &self.tab.results) {
             let dirs = entries
                 .iter()

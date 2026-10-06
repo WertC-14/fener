@@ -187,6 +187,8 @@ pub fn turkish(en: &str) -> Option<&'static str> {
         "Next tab" => "Sonraki sekme",
         "This is the last tab (q quits)" => "Bu son sekme (q çıkar)",
         "Go to tab" => "Sekmeye geç",
+        "New: {}" => "Yeni: {}",
+        "{} new items" => "{} yeni öğe",
         "Opened in a new tab (Alt+2… or the wheel on the tabs)" => {
             "Yeni sekmede açıldı (Alt+2… ya da sekmelerde tekerlek)"
         }

@@ -54,6 +54,13 @@ fn main() -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     let input = Arc::new(event::InputGate::default());
     event::spawn_input_thread(tx.clone(), input.clone());
+    // The safety net under the folder watcher (watch.rs): a look at the folder's time every 2 s.
+    let ticks = tx.clone();
+    std::thread::spawn(move || {
+        while ticks.send(event::AppEvent::Tick).is_ok() {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
 
     // `fener FILE` starts in the file's folder and opens it; `fener FOLDER` starts there.
     let arg = std::env::args_os().nth(1).map(PathBuf::from);
