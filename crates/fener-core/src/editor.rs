@@ -1317,7 +1317,10 @@ impl Editor {
                 self.reader = false;
                 self.leave_reader();
             }
-            _ => self.message = Some("Reader: j k scroll, i or Esc to edit, Space u m".into()),
+            _ => {
+                self.message =
+                    Some("Reader: j k scroll, i / Esc / Ctrl+E to edit, Space r back".into())
+            }
         }
         self.reader_top = self.reader_top.min(last);
     }

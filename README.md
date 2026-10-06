@@ -25,7 +25,7 @@ follows the file: code files get run / build, Markdown files get the reader and 
 | `Space Enter` run (F5), code | `Space b` build / check, code | `Space t` terminal open / close | `Space w` save |
 | `Space r` reader / source (read), Markdown | `Space h` go to heading, Markdown | | |
 | `Space Space` find files | `Space /` find text | `Space o` find in file | `Space e` folder tree |
-| `Space 1…9` go to tab (1: files) | `Space s k` all keys | `Space u m` Markdown reader | `Space q q` quit |
+| `Space 1…9` go to tab (1: files) | `Space s k` all keys | `Ctrl+E` Markdown read / edit | `Space q q` quit |
 
 - Tabs: `Alt+1` the files, `Alt+2…9` the others, or click a tab; `:q` closes a code tab. Unsaved changes show a `●`
   on the tab and are never dropped silently: `:q`, a middle click and quitting fener show that tab with a warning
@@ -51,7 +51,7 @@ follows the file: code files get run / build, Markdown files get the reader and 
 - Syntax colors (keywords, functions and macros, types, strings, numbers, comments) for C-like, `#`-comment and
   `--`-comment languages and Markdown, in the file manager's theme
 - Markdown files open in a reader: headings, lists, task boxes, quotes, framed code, **bold**, *italic*, links,
-  wrapped at words. `j k Ctrl+D Ctrl+U g G` scroll, `i` or `Esc` edits the source there, `Space u m` back
+  wrapped at words. `j k Ctrl+D Ctrl+U g G` scroll, `i`, `Esc` or `Ctrl+E` edits the source there, `Space r` or `Ctrl+E` back
 
 The file manager itself is liman's: grid / normal / detailed views, Places, preview, built-in terminal, git panel,
 tabs, themes. Its guide: [liman's KILAVUZ](https://github.com/WertC-14/liman/blob/main/docs/KILAVUZ.md).
