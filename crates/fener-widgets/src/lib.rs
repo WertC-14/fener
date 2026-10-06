@@ -5,6 +5,7 @@
 //! "night").
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use fener_core::command::DASHBOARD;
 use fener_core::picker::{Kind, Picker};
@@ -438,10 +439,24 @@ fn draw_which_key(buf: &mut Buffer, area: Rect, menu: &[(char, &str)], typed: &s
     Widget::render(Paragraph::new(lines), inner, buf);
 }
 
-/// Nerd Font icons, unless `FENER_ICONS=plain` (LazyVim assumes a Nerd Font too).
+/// 0: not decided yet (read `FENER_ICONS`), 1: Nerd Font icons, 2: none.
+static NERD: AtomicU8 = AtomicU8::new(0);
+
+/// Turns the Nerd Font icons on or off (an embedding app follows its own setting).
+pub fn set_nerd(on: bool) {
+    NERD.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Nerd Font icons, unless `FENER_ICONS=plain` or [`set_nerd`] (LazyVim assumes a Nerd Font too).
 fn nerd() -> bool {
-    static NERD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *NERD.get_or_init(|| std::env::var("FENER_ICONS").map_or(true, |v| v != "plain"))
+    match NERD.load(Ordering::Relaxed) {
+        0 => {
+            let on = std::env::var("FENER_ICONS").map_or(true, |v| v != "plain");
+            set_nerd(on);
+            on
+        }
+        n => n == 1,
+    }
 }
 
 fn command_icon(command: Command) -> &'static str {
