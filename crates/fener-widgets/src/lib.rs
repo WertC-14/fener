@@ -400,9 +400,15 @@ fn draw_status(buf: &mut Buffer, area: Rect, editor: &Editor) {
         l if l + 1 == lines => "Bot".to_string(),
         l => format!("{}%", (l + 1) * 100 / lines),
     };
+    // Markdown: the key between reading and editing, where the eye already is.
+    let hint = match (editor.context(), editor.reader) {
+        (fener_core::command::When::Markdown, true) => "Ctrl+E edit  ",
+        (fener_core::command::When::Markdown, false) => "Ctrl+E read  ",
+        _ => "",
+    };
     let right = Line::from(vec![
         Span::styled(
-            format!("{}  ", editor.pending_keys()),
+            format!("{}  {hint}", editor.pending_keys()),
             Style::new().fg(t().fg_dim),
         ),
         Span::styled(

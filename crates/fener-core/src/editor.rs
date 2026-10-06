@@ -417,6 +417,21 @@ impl Editor {
             self.picker_key(key);
             return;
         }
+        // IDE habits that work in every mode: Ctrl+Z / Ctrl+Y undo and redo, and in a Markdown
+        // file Ctrl+E switches between the reader and editing (Obsidian's key).
+        if self.pending.is_empty() && !self.tree_focus {
+            match key {
+                Key::Ctrl('z') => return self.undo_redo(true),
+                Key::Ctrl('y') => return self.undo_redo(false),
+                Key::Ctrl('e') if self.context() == When::Markdown => {
+                    if self.mode != Mode::Normal {
+                        self.handle_key(Key::Esc);
+                    }
+                    return self.run_command(Command::ToggleReader);
+                }
+                _ => {}
+            }
+        }
         if self.dashboard.is_some()
             && self.mode == Mode::Normal
             && self.pending.is_empty()
@@ -1155,6 +1170,45 @@ impl Editor {
             self.top = line.saturating_sub(self.view_height / 2);
         }
         self.remember(path);
+    }
+
+    /// Ctrl+Z / Ctrl+Y. In Insert mode the typing so far becomes its own undo step first, and
+    /// typing goes on after; Visual mode ends.
+    fn undo_redo(&mut self, undo: bool) {
+        let insert = self.mode == Mode::Insert;
+        if insert {
+            self.doc.end_step(self.cursor);
+            self.recording_insert = false;
+        } else if self.mode != Mode::Normal {
+            self.handle_key(Key::Esc);
+        }
+        if self.reader {
+            self.reader = false;
+            self.leave_reader();
+        }
+        let to = if undo {
+            self.doc.undo()
+        } else {
+            self.doc.redo()
+        };
+        match to {
+            Some(pos) => self.cursor = pos.min(self.doc.rope.len_chars()),
+            None => {
+                self.message = Some(
+                    if undo {
+                        "Already at oldest change"
+                    } else {
+                        "Already at newest change"
+                    }
+                    .into(),
+                );
+            }
+        }
+        if insert {
+            self.doc.begin_step(self.cursor);
+        } else {
+            self.clamp();
+        }
     }
 
     /// F5 / `Space Enter` / `Space b`: saves, then asks the app to type the file's run (or
@@ -2276,7 +2330,7 @@ mod tests {
         // The Space menu of a Markdown file: no run / build, but reader and headings.
         e.handle_key(Key::Char(' '));
         let menu = e.leader_menu().unwrap();
-        assert!(menu.contains(&('m', "Reader / Source")));
+        assert!(menu.contains(&('m', "Reader / Source (Ctrl+E)")));
         assert!(menu.contains(&('h', "Go to Heading")));
         assert!(!menu.iter().any(|(k, _)| *k == '↵' || *k == 'b'));
         // Space h: the headings; picking one scrolls the reader there.
@@ -2432,6 +2486,44 @@ mod tests {
             (2, "one\ntwo\nthree\n")
         );
         assert_eq!(e.state.recent[0], file);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ctrl_z_and_ctrl_y_in_every_mode() {
+        let mut e = ed("|abc");
+        // Normal mode.
+        e.handle_key(Key::Char('x'));
+        e.handle_key(Key::Ctrl('z'));
+        assert_eq!(e.doc.rope.to_string(), "abc");
+        e.handle_key(Key::Ctrl('y'));
+        assert_eq!(e.doc.rope.to_string(), "bc");
+        // Insert mode: what was typed goes, typing goes on.
+        for k in keys("ixy") {
+            e.handle_key(k);
+        }
+        e.handle_key(Key::Ctrl('z'));
+        assert_eq!(
+            (e.doc.rope.to_string().as_str(), e.mode),
+            ("bc", Mode::Insert)
+        );
+        e.handle_key(Key::Char('q'));
+        assert_eq!(e.doc.rope.to_string(), "qbc");
+    }
+
+    #[test]
+    fn ctrl_e_switches_markdown_between_reader_and_editing() {
+        let dir = std::env::temp_dir().join(format!("fener-ctrl-e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("n.md");
+        std::fs::write(&file, "# T\n").unwrap();
+        let mut e = Editor::new(Document::open(&file).unwrap());
+        assert!(e.reader);
+        e.handle_key(Key::Ctrl('e'));
+        assert!(!e.reader);
+        e.handle_key(Key::Char('i'));
+        e.handle_key(Key::Ctrl('e'));
+        assert!(e.reader && e.mode == Mode::Normal);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

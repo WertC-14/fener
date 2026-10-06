@@ -45,6 +45,8 @@ follows the file: code files get run / build, Markdown files get the reader and 
   - motions: `h j k l`, `w W b B e E`, `0 ^ $`, `gg G` (`5G`), `f t F T ; ,`, `{ }`, `%`, `n N`, `*`
   - operators: `d c y > <` (`dd cc yy >> <<`), text objects `iw aw iW aW i" a" i' i( a( i[ i{ i<` ...
   - `x X s S D C Y p P J r ~ u Ctrl+R .`, Insert (`i a I A o O`), Visual (`v V`)
+- IDE keys in every mode: `Ctrl+Z` undo, `Ctrl+Y` redo, `Ctrl+S` save; in Markdown `Ctrl+E` switches between the
+  reader and editing (as in Obsidian; the status line shows it)
 - Search `/` `?` with smart case, `:w`, `:e FILE`, `Ctrl+S`
 - Syntax colors (keywords, functions and macros, types, strings, numbers, comments) for C-like, `#`-comment and
   `--`-comment languages and Markdown, in the file manager's theme
