@@ -5,6 +5,9 @@ It starts small and grows one piece at a time; sister project of [liman](https:/
 
 **Status:** early development (v0.1 in progress).
 
+![fener: Visual mode, relative line numbers, lualine-like status line](docs/img/normal.png)
+![The Space leader with its which-key box](docs/img/which-key.png)
+
 ## What works
 
 - Open, edit and save a file: `fener FILE`, `:w`, `:q`, `:wq`, `:x`, `:q!`, `Ctrl+S`
