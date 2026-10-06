@@ -191,6 +191,14 @@ impl App {
                 tab.term_focus = false;
             } else if key.code == KeyCode::F(6) {
                 tab.term_focus = false;
+            } else if key.code == KeyCode::Tab
+                && tab
+                    .terminal
+                    .as_ref()
+                    .is_none_or(|t| t.typed_text().trim().is_empty())
+            {
+                // Tab on an empty command line: up to the text (with text typed, it completes).
+                tab.term_focus = false;
             } else if let Some(term) = &mut tab.terminal {
                 term.send_key(key);
             }
@@ -232,6 +240,7 @@ impl App {
 
     /// Does what code tab `i`'s editor asked for (state on the spot, lists on a worker).
     fn code_requests(&mut self, i: usize) {
+        let mut switch_to = None;
         let tab = &mut self.code.tabs[i];
         for request in std::mem::take(&mut tab.editor.requests) {
             match request {
@@ -242,6 +251,12 @@ impl App {
                     }
                     continue;
                 }
+                Request::SwitchTab(n) => {
+                    switch_to = Some(n);
+                    continue;
+                }
+                // Space t, Ctrl+/ from the text: to the shell (opened if needed), as LazyVim's
+                // Ctrl+/; inside it Ctrl+/ hides it and Tab goes back up.
                 Request::ToggleTerminal => {
                     let root = tab.editor.root.clone();
                     if open_terminal(tab, &root, &self.tx) {
@@ -303,6 +318,9 @@ impl App {
                 }
             });
         }
+        if let Some(n) = switch_to {
+            self.switch_any_tab(n);
+        }
     }
 
     /// Draws the active code tab into `area`; returns where the terminal cursor goes.
@@ -331,9 +349,9 @@ impl App {
                 liman_widgets::theme::dim()
             };
             let hint = if tab.term_focus {
-                " Terminal · F6 to the text · Ctrl+/ hide · F5 run again "
+                " Terminal · Tab (empty line) up to the text · Ctrl+/ hide · F5 run again "
             } else {
-                " Terminal · F6 to type here · Ctrl+/ open "
+                " Terminal · Space t or F6 to type here "
             };
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)

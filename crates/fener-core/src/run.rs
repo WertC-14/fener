@@ -1,4 +1,4 @@
-//! F5: how to build and run the open file. A project file (Cargo, Go module, Makefile) runs the
+//! F5 / `Space Enter`: how to build and run the open file (`Space b`: build only). A project file (Cargo, Go module, Makefile) runs the
 //! project; a lone file is compiled and run by its language's tool, the way one would type it
 //! (`rustc lab-1.rs && ./lab-1`). The app types the command into the code tab's terminal, so the
 //! program's output stays visible and it can read input.
@@ -12,8 +12,16 @@ pub struct Run {
     pub command: String,
 }
 
-/// How to run `file`, or `None` for a file type fener does not know how to run.
-pub fn command_for(file: &Path) -> Option<Run> {
+/// Run the program, or only build it (compile / check, no run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Goal {
+    Run,
+    Build,
+}
+
+/// How to run (or build) `file`, or `None` for a file type fener does not know.
+pub fn command_for(file: &Path, goal: Goal) -> Option<Run> {
+    let build = goal == Goal::Build;
     let dir = file.parent()?.to_path_buf();
     let name = file.file_name()?.to_str()?;
     let stem = file.file_stem()?.to_str()?;
@@ -30,28 +38,54 @@ pub fn command_for(file: &Path) -> Option<Run> {
     {
         let rel = file.strip_prefix(&cargo).ok()?;
         let parts: Vec<&str> = rel.iter().filter_map(|p| p.to_str()).collect();
+        let verb = if build { "build" } else { "run" };
         let command = match parts.as_slice() {
-            ["src", "bin", _] => format!("cargo run --bin {}", quote(stem)),
-            ["src", "bin", bin, "main.rs"] => format!("cargo run --bin {}", quote(bin)),
-            ["examples", _] => format!("cargo run --example {}", quote(stem)),
+            ["src", "bin", _] => format!("cargo {verb} --bin {}", quote(stem)),
+            ["src", "bin", bin, "main.rs"] => format!("cargo {verb} --bin {}", quote(bin)),
+            ["examples", _] => format!("cargo {verb} --example {}", quote(stem)),
+            ["tests", _] if build => format!("cargo test --no-run --test {}", quote(stem)),
             ["tests", _] => format!("cargo test --test {}", quote(stem)),
-            _ => "cargo run".to_string(),
+            _ => format!("cargo {verb}"),
         };
         return run(&cargo, command);
     }
     if ext == "go"
         && let Some(module) = ancestor_with(&dir, "go.mod")
     {
-        return run(&module, "go run .".into());
+        return run(
+            &module,
+            if build { "go build ./..." } else { "go run ." }.into(),
+        );
     }
     if dir.join("Makefile").exists() && matches!(ext, "c" | "cpp" | "cc" | "h" | "hpp") {
         return run(&dir, "make".into());
     }
     let (file, bin) = (quote(name), quote(&format!("./{stem}")));
+    let out = quote(stem);
+    if build {
+        let command = match ext {
+            "rs" => format!("rustc {file}"),
+            "c" => format!("cc {file} -o {out}"),
+            "cpp" | "cc" | "cxx" => format!("c++ {file} -o {out}"),
+            "go" => format!("go build {file}"),
+            "py" => format!("python3 -m py_compile {file}"),
+            "js" | "mjs" | "cjs" => format!("node --check {file}"),
+            "ts" => format!("npx tsc --noEmit {file}"),
+            "sh" | "bash" => format!("bash -n {file}"),
+            "zsh" => format!("zsh -n {file}"),
+            "fish" => format!("fish -n {file}"),
+            "lua" => format!("luac -p {file}"),
+            "rb" => format!("ruby -c {file}"),
+            "java" => format!("javac {file}"),
+            "php" => format!("php -l {file}"),
+            _ => return None,
+        };
+        return run(&dir, command);
+    }
     let command = match ext {
         "rs" => format!("rustc {file} && {bin}"),
-        "c" => format!("cc {file} -o {} && {bin}", quote(stem)),
-        "cpp" | "cc" | "cxx" => format!("c++ {file} -o {} && {bin}", quote(stem)),
+        "c" => format!("cc {file} -o {out} && {bin}"),
+        "cpp" | "cc" | "cxx" => format!("c++ {file} -o {out} && {bin}"),
         "go" => format!("go run {file}"),
         "py" => format!("python3 {file}"),
         "js" | "mjs" | "cjs" => format!("node {file}"),
@@ -116,7 +150,8 @@ mod tests {
         fs::write(base.join("Cargo.toml"), "").unwrap(); // a workspace file above the lab
         fs::write(pkg.join("Cargo.toml"), "").unwrap();
 
-        let cmd = |p: &Path| command_for(p).map(|r| (r.dir, r.command));
+        let cmd = |p: &Path| command_for(p, Goal::Run).map(|r| (r.dir, r.command));
+        let build = |p: &Path| command_for(p, Goal::Build).map(|r| r.command);
         // A lab file outside any src/ is compiled on its own, next to itself.
         assert_eq!(
             cmd(&lab.join("lab-1.rs")),
@@ -135,6 +170,15 @@ mod tests {
             "python3 'my file.py'"
         );
         assert_eq!(cmd(&lab.join("notes.md")), None);
+        assert_eq!(build(&lab.join("lab-1.rs")).unwrap(), "rustc lab-1.rs");
+        assert_eq!(
+            build(&pkg.join("src/bin/tool.rs")).unwrap(),
+            "cargo build --bin tool"
+        );
+        assert_eq!(
+            build(&lab.join("a.py")).unwrap(),
+            "python3 -m py_compile a.py"
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 }

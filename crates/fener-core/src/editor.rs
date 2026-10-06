@@ -164,6 +164,8 @@ enum Cmd {
     Operate(Operator, Target),
     Act(Action),
     Leader(Command),
+    /// `Space 1`…`Space 9`: a tab (the app's; 1 is the file manager).
+    GoTab(usize),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -180,6 +182,8 @@ const SCROLL_OFF: usize = 4;
 /// Work the editor asks the app to do (it has the threads and the disk).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
+    /// Show tab `n` (0-based; `Space 1` is 0, the file manager).
+    SwitchTab(usize),
     /// List the files under `root` for the Files picker.
     ListFiles,
     /// Search the files under `root` for this text, for the Grep picker.
@@ -349,6 +353,7 @@ impl Editor {
             .iter()
             .filter_map(|k| match k {
                 Key::Char(c) => Some(*c),
+                Key::Enter => Some('⏎'),
                 _ => None,
             })
             .collect();
@@ -371,7 +376,12 @@ impl Editor {
                 }
             }
         }
-        items.sort_by_key(|(k, _)| *k);
+        if typed.is_empty() {
+            items.push(('1', "1…9  Go to Tab (1: files)"));
+        }
+        // Enter, Space and the tab digits first, then the letters.
+        let rank = |k: char| ['⏎', ' ', '1'].iter().position(|&f| f == k).unwrap_or(3);
+        items.sort_by_key(|&(k, _)| (rank(k), k));
         Some(items)
     }
 
@@ -500,6 +510,7 @@ impl Editor {
             Cmd::Operate(op, target) => self.operate(op, target, n, count),
             Cmd::Act(action) => self.act(action, n),
             Cmd::Leader(command) => self.run_command(command),
+            Cmd::GoTab(n) => self.requests.push(Request::SwitchTab(n - 1)),
         }
     }
 
@@ -1055,29 +1066,8 @@ impl Editor {
                     .collect();
                 self.picker = Some(Picker::new(Kind::Lines, "Find in File", items));
             }
-            Command::Run => {
-                let Some(path) = self.doc.path().map(Path::to_path_buf) else {
-                    self.message = Some("Save the file first (:w name)".into());
-                    return;
-                };
-                let file = std::path::absolute(&path).unwrap_or(path);
-                let configured = self
-                    .config
-                    .run_command(&file)
-                    .map(|command| crate::run::Run {
-                        dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
-                        command,
-                    });
-                match configured.or_else(|| crate::run::command_for(&file)) {
-                    Some(run) => {
-                        if self.doc.is_modified() {
-                            self.save(None);
-                        }
-                        self.requests.push(Request::Run(run));
-                    }
-                    None => self.message = Some("No run command for this kind of file".into()),
-                }
-            }
+            Command::Run => self.run_file(crate::run::Goal::Run),
+            Command::Build => self.run_file(crate::run::Goal::Build),
             Command::Terminal => self.requests.push(Request::ToggleTerminal),
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
@@ -1124,6 +1114,32 @@ impl Editor {
             self.top = line.saturating_sub(self.view_height / 2);
         }
         self.remember(path);
+    }
+
+    /// F5 / `Space Enter` / `Space b`: saves, then asks the app to type the file's run (or
+    /// build) command in the terminal. The config file's `[run]` / `[build]` comes first.
+    fn run_file(&mut self, goal: crate::run::Goal) {
+        let Some(path) = self.doc.path().map(Path::to_path_buf) else {
+            self.message = Some("Save the file first (:w name)".into());
+            return;
+        };
+        let file = std::path::absolute(&path).unwrap_or(path);
+        let configured = self
+            .config
+            .run_command(&file, goal)
+            .map(|command| crate::run::Run {
+                dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
+                command,
+            });
+        match configured.or_else(|| crate::run::command_for(&file, goal)) {
+            Some(run) => {
+                if self.doc.is_modified() {
+                    self.save(None);
+                }
+                self.requests.push(Request::Run(run));
+            }
+            None => self.message = Some("No run command for this kind of file".into()),
+        }
     }
 
     /// Takes the config file's settings (line numbers, indent, keys, `[run]`).
@@ -1928,8 +1944,12 @@ fn parse_leader(keys: &[Key]) -> Parsed {
     for key in keys {
         match key {
             Key::Char(c) => typed.push(*c),
+            Key::Enter => typed.push('⏎'),
             _ => return Parsed::Invalid,
         }
+    }
+    if let Some(n) = typed.parse::<usize>().ok().filter(|n| (1..=9).contains(n)) {
+        return Parsed::Done(None, Cmd::GoTab(n));
     }
     if let Some(b) = COMMANDS
         .iter()
@@ -2122,14 +2142,19 @@ mod tests {
         assert_eq!(
             e.leader_menu(),
             Some(vec![
+                ('⏎', "Run (F5)"),
                 (' ', "Find Files"),
+                ('1', "1…9  Go to Tab (1: files)"),
                 ('/', "Find Text (Grep)"),
+                ('b', "Build / Check (no run)"),
                 ('e', "Explorer (folder tree; Ctrl+B)"),
                 ('f', "+file/find"),
+                ('o', "Find in File (Ctrl+F)"),
                 ('q', "+quit/session"),
-                ('r', "Run / Build the File (F5)"),
                 ('s', "+search"),
-                ('u', "+ui")
+                ('t', "Terminal (Ctrl+/; Tab back up)"),
+                ('u', "+ui"),
+                ('w', "Save (Ctrl+S)")
             ])
         );
         e.handle_key(Key::Char('u'));
@@ -2239,6 +2264,21 @@ mod tests {
         assert!(e.requests.contains(&Request::Run(run)));
         e.handle_key(Key::Ctrl('/'));
         assert_eq!(e.requests.last(), Some(&Request::ToggleTerminal));
+        // Space as a super key: Enter runs, b builds, t terminal, 3 tab three.
+        e.requests.clear();
+        for k in keys("<Space><CR><Space>b<Space>t<Space>3") {
+            e.handle_key(k);
+        }
+        let build = crate::run::Run {
+            dir: dir.clone(),
+            command: "python3 -m py_compile hi.py".into(),
+        };
+        assert_eq!(e.requests.len(), 4);
+        assert_eq!(e.requests[1], Request::Run(build));
+        assert_eq!(
+            e.requests[2..],
+            [Request::ToggleTerminal, Request::SwitchTab(2)]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

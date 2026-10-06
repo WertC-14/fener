@@ -28,8 +28,10 @@ use crate::editor::Key;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub editor: EditorOptions,
-    /// File extension → F5 command template.
+    /// File extension → F5 / `Space Enter` command template.
     pub run: HashMap<String, String>,
+    /// File extension → `Space b` command template.
+    pub build: HashMap<String, String>,
     /// Key (`F9`, `ctrl-t`) → command name (`run`, `terminal`, ...).
     pub keys: HashMap<String, String>,
 }
@@ -95,10 +97,14 @@ impl Config {
             .collect()
     }
 
-    /// The `[run]` command for `file`, with its placeholders filled in.
-    pub fn run_command(&self, file: &Path) -> Option<String> {
+    /// The `[run]` (or `[build]`) command for `file`, with its placeholders filled in.
+    pub fn run_command(&self, file: &Path, goal: crate::run::Goal) -> Option<String> {
         let ext = file.extension()?.to_str()?;
-        let template = self.run.get(ext)?;
+        let table = match goal {
+            crate::run::Goal::Run => &self.run,
+            crate::run::Goal::Build => &self.build,
+        };
+        let template = table.get(ext)?;
         let quote = |s: &str| {
             if s.chars()
                 .all(|c| c.is_alphanumeric() || "._-/+".contains(c))
@@ -170,7 +176,9 @@ mod tests {
         assert_eq!(config.editor.indent, 4);
         assert!(config.editor.tree_open, "missing fields keep their default");
         assert_eq!(
-            config.run_command(Path::new("/x/my lab.rs")).unwrap(),
+            config
+                .run_command(Path::new("/x/my lab.rs"), crate::run::Goal::Run)
+                .unwrap(),
             "rustc 'my lab.rs' && ./'my lab'"
         );
         let keymap = config.keymap();

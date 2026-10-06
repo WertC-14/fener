@@ -17,7 +17,13 @@ project's folder tree beside it. `Alt+1` is always back to the files.
 ## Code tabs
 
 You do not need to know the keys: `Space` shows what can follow (which-key), and `Space s k` lists every key and
-runs the one you pick.
+runs the one you pick. Space works like a super key; the everyday commands are one key after it:
+
+| | | | |
+|---|---|---|---|
+| `Space Enter` run (F5) | `Space b` build / check | `Space t` terminal | `Space w` save |
+| `Space Space` find files | `Space /` find text | `Space o` find in file | `Space e` folder tree |
+| `Space 1…9` go to tab (1: files) | `Space s k` all keys | `Space u m` Markdown reader | `Space q q` quit |
 
 - Tabs: `Alt+1` the files, `Alt+2…9` the others, or click a tab; `:q` closes a code tab. Unsaved changes show a `●`
   on the tab and are never dropped silently: `:q`, a middle click and quitting fener show that tab with a warning
@@ -25,7 +31,8 @@ runs the one you pick.
 - `F5` saves, builds and runs the file in a terminal under the text: `cargo run` in a Cargo package (`--bin`,
   `--example` as fits), else the file's own tool (`rustc lab-1.rs && ./lab-1`, `python3`, `cc`, `go run`, `node`,
   `bash`, ...)
-- Terminal under the text: `Ctrl+/` or `F4` (as LazyVim), `F6` moves between text and shell
+- Terminal under the text: `Space t`, `Ctrl+/` or `F4` (as LazyVim); `Tab` on an empty command line goes back up
+  to the text (with something typed it completes), `F6` too; `Ctrl+/` in the shell hides it
 - `Ctrl+F` finds in this file (`Space s b`); Enter jumps, `n` / `N` go on
 - Line numbers stay put (absolute); `Space u L` for relative ones
 - Folder tree on the left (`Space e` or `Ctrl+B`, `Tab` moves between tree and text): the git repository around the file (else its folder), the file revealed;

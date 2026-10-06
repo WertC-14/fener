@@ -8,6 +8,7 @@ pub enum Command {
     Explorer,
     SearchLines,
     Run,
+    Build,
     Terminal,
     RecentFiles,
     FindText,
@@ -31,6 +32,7 @@ impl Command {
             Self::Explorer => "explorer",
             Self::SearchLines => "find-in-file",
             Self::Run => "run",
+            Self::Build => "build",
             Self::Terminal => "terminal",
             Self::RecentFiles => "recent-files",
             Self::FindText => "find-text",
@@ -71,10 +73,15 @@ const fn bind(command: Command, leader: &'static str, label: &'static str) -> Bi
 }
 
 pub const COMMANDS: &[Binding] = &[
+    // Space as a "super key": the everyday commands are one key after it.
+    bind(Command::Run, "⏎", "Run (F5)"),
     bind(Command::FindFiles, " ", "Find Files"),
     bind(Command::FindText, "/", "Find Text (Grep)"),
+    bind(Command::Build, "b", "Build / Check (no run)"),
     bind(Command::Explorer, "e", "Explorer (folder tree; Ctrl+B)"),
-    bind(Command::Run, "r", "Run / Build the File (F5)"),
+    bind(Command::Terminal, "t", "Terminal (Ctrl+/; Tab back up)"),
+    bind(Command::Save, "w", "Save (Ctrl+S)"),
+    bind(Command::SearchLines, "o", "Find in File (Ctrl+F)"),
     bind(Command::FindFiles, "ff", "Find Files"),
     bind(Command::RecentFiles, "fr", "Recent Files"),
     bind(Command::NewFile, "fn", "New File"),
@@ -93,7 +100,6 @@ pub const COMMANDS: &[Binding] = &[
     bind(Command::ClearSearch, "ur", "Clear Search Highlight"),
     bind(Command::Quit, "qq", "Quit All"),
     bind(Command::Dashboard, "", "Start Screen (:Dashboard)"),
-    bind(Command::Save, "", "Save File (Ctrl+S, :w)"),
 ];
 
 /// Names of the leader groups (shown as `+name` in which-key).
@@ -156,7 +162,8 @@ pub const VIM_KEYS: &[(&str, &str)] = &[
     ("Tab", "Folder tree <-> text (Ctrl+H, Ctrl+L too)"),
     ("Ctrl+B", "Show / hide the folder tree"),
     ("Ctrl+F", "Find in this file"),
-    ("F5", "Save, build and run in the terminal"),
+    ("F5", "Save, build and run in the terminal (Space Enter)"),
+    ("␣ 1…9", "Go to tab 1…9 (1: the files)"),
     (
         "Ctrl+/ F4",
         "Terminal below the text; F6 moves between them",
