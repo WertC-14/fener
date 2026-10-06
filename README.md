@@ -51,7 +51,9 @@ fener notes.md
 
 - `crates/fener-core` — no terminal code: the document (rope + change record + undo), Vim motions and text
   objects, the editor state machine, the command table, pickers, fuzzy matching, file walk and grep.
-- `crates/fener` — the terminal app (Ratatui).
+- `crates/fener-widgets` — Ratatui drawing (text, status line, which-key, pickers); the theme is passed in,
+  so other apps (liman's code tabs) can embed an editor.
+- `crates/fener` — the terminal app.
 
 ## License
 

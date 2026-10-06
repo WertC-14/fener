@@ -346,8 +346,8 @@ name = "fener"
 version = "0.1.0"
 dependencies = [
  "fener-core",
+ "fener-widgets",
  "ratatui",
- "unicode-width",
 ]
 
 [[package]]
@@ -355,6 +355,15 @@ name = "fener-core"
 version = "0.1.0"
 dependencies = [
  "ropey",
+]
+
+[[package]]
+name = "fener-widgets"
+version = "0.1.0"
+dependencies = [
+ "fener-core",
+ "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

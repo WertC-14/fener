@@ -1,38 +1,44 @@
-//! Draws the editor: the text with line numbers, the status line, the command line and the
-//! which-key box, the start screen and the pickers. The default colors are LazyVim's
-//! (tokyonight "night").
+//! Ratatui drawing of a fener editor: the text with line numbers, the status line, the command
+//! line, the which-key box, the start screen and the pickers. Used by the `fener` app and by
+//! liman's code tabs (fm-research ADR 0011), so nothing here owns the terminal: [`render`] draws
+//! into a buffer area with a theme it is given. The default colors are LazyVim's (tokyonight
+//! "night").
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use fener_core::command::DASHBOARD;
 use fener_core::picker::{Kind, Picker};
 use fener_core::text;
 use fener_core::{Command, Editor, Mode};
-use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget};
 
-/// A color scheme. The first is LazyVim's default; `Space u C` switches with a live preview.
+/// A color scheme. [`THEMES`] has fener's own; an embedding app can make one from its palette.
+#[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub name: &'static str,
-    bg: Color,
-    bg_dark: Color,
-    bg_line: Color,
-    bg_visual: Color,
-    bg_search: Color,
-    fg: Color,
-    fg_dim: Color,
-    gutter: Color,
-    orange: Color,
-    blue: Color,
-    green: Color,
-    magenta: Color,
-    yellow: Color,
-    red: Color,
-    cyan: Color,
+    /// Text background.
+    pub bg: Color,
+    /// Status line, panels, picker box.
+    pub bg_dark: Color,
+    /// Cursor line and selected rows.
+    pub bg_line: Color,
+    pub bg_visual: Color,
+    pub bg_search: Color,
+    pub fg: Color,
+    pub fg_dim: Color,
+    /// Line numbers and `~` past the end.
+    pub gutter: Color,
+    pub orange: Color,
+    pub blue: Color,
+    pub green: Color,
+    pub magenta: Color,
+    pub yellow: Color,
+    pub red: Color,
+    pub cyan: Color,
 }
 
 const fn hex(v: u32) -> Color {
@@ -67,11 +73,13 @@ pub const THEMES: [Theme; 6] = [
         0xfe8019, 0x83a598, 0xb8bb26, 0xd3869b, 0xfabd2f, 0xfb4934, 0x8ec07c]),
 ];
 
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// The theme of the frame being drawn (set by [`render`]).
+    static CURRENT: Cell<Theme> = const { Cell::new(THEMES[0]) };
+}
 
-/// The theme in use (the editor's choice, set at the start of each frame).
-fn t() -> &'static Theme {
-    &THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+fn t() -> Theme {
+    CURRENT.with(Cell::get)
 }
 
 /// Cells a tab takes (LazyVim: `tabstop = 2`).
@@ -84,31 +92,38 @@ pub struct View {
     pub left: usize,
 }
 
-/// Draws a frame; returns where the terminal cursor goes.
-pub fn render(frame: &mut Frame, editor: &mut Editor, view: &mut View) -> Option<(u16, u16)> {
-    CURRENT.store(editor.theme, Ordering::Relaxed);
+/// Draws `editor` into `area` with `theme`; returns where the terminal cursor goes.
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    editor: &mut Editor,
+    view: &mut View,
+    theme: &Theme,
+) -> Option<(u16, u16)> {
+    CURRENT.with(|c| c.set(*theme));
     let [body, status, command] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
-    frame.render_widget(Block::new().style(Style::new().bg(t().bg)), frame.area());
+    .areas(area);
+    Block::new()
+        .style(Style::new().bg(t().bg))
+        .render(area, buf);
     let mut cursor = None;
     if let Some(selected) = editor.dashboard {
-        draw_dashboard(frame.buffer_mut(), body.union(status), selected);
+        draw_dashboard(buf, body.union(status), selected);
     } else {
         editor.scroll_to_cursor(usize::from(body.height));
-        cursor = draw_text(frame.buffer_mut(), body, editor, view);
-        draw_status(frame, status, editor);
+        cursor = draw_text(buf, body, editor, view);
+        draw_status(buf, status, editor);
     }
-    let command_cursor = draw_command_line(frame, command, editor);
+    let command_cursor = draw_command_line(buf, command, editor);
     if let Some(menu) = editor.leader_menu() {
-        draw_which_key(frame, body, &menu, &editor.pending_keys());
+        draw_which_key(buf, body, &menu, &editor.pending_keys());
     }
     if let Some(picker) = &editor.picker {
-        let area = frame.area();
-        return draw_picker(frame.buffer_mut(), area, picker);
+        return draw_picker(buf, area, picker);
     }
     command_cursor.or(cursor)
 }
@@ -282,7 +297,7 @@ fn mode_label(mode: Mode) -> (&'static str, Color) {
 }
 
 /// lualine-like: the mode in its color, the file, and on the right pending keys, position, %.
-fn draw_status(frame: &mut Frame, area: Rect, editor: &Editor) {
+fn draw_status(buf: &mut Buffer, area: Rect, editor: &Editor) {
     let (mode, color) = mode_label(editor.mode);
     let name = editor
         .doc
@@ -324,13 +339,13 @@ fn draw_status(frame: &mut Frame, area: Rect, editor: &Editor) {
         ),
     ])
     .right_aligned();
-    frame.render_widget(Block::new().style(Style::new().bg(t().bg_dark)), area);
-    frame.render_widget(Paragraph::new(left), area);
-    frame.render_widget(Paragraph::new(right), area);
+    Widget::render(Block::new().style(Style::new().bg(t().bg_dark)), area, buf);
+    Widget::render(Paragraph::new(left), area, buf);
+    Widget::render(Paragraph::new(right), area, buf);
 }
 
 /// The `:` / `/` line while typing, otherwise the last message. Returns the cursor there.
-fn draw_command_line(frame: &mut Frame, area: Rect, editor: &Editor) -> Option<(u16, u16)> {
+fn draw_command_line(buf: &mut Buffer, area: Rect, editor: &Editor) -> Option<(u16, u16)> {
     let prefix = match editor.mode {
         Mode::Command => ":",
         Mode::Search => "/",
@@ -345,9 +360,10 @@ fn draw_command_line(frame: &mut Frame, area: Rect, editor: &Editor) -> Option<(
                 } else {
                     t().fg
                 };
-                frame.render_widget(
+                Widget::render(
                     Paragraph::new(message.as_str()).style(Style::new().fg(color).bg(t().bg)),
                     area,
+                    buf,
                 );
             }
             return None;
@@ -355,15 +371,16 @@ fn draw_command_line(frame: &mut Frame, area: Rect, editor: &Editor) -> Option<(
     };
     let text = format!("{prefix}{}", editor.cmdline);
     let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
-    frame.render_widget(
+    Widget::render(
         Paragraph::new(text).style(Style::new().fg(t().fg).bg(t().bg)),
         area,
+        buf,
     );
     Some((area.x + width.min(area.width.saturating_sub(1)), area.y))
 }
 
 /// which-key: the keys that can follow, in a box at the bottom right.
-fn draw_which_key(frame: &mut Frame, area: Rect, menu: &[(char, &str)], typed: &str) {
+fn draw_which_key(buf: &mut Buffer, area: Rect, menu: &[(char, &str)], typed: &str) {
     let width = menu
         .iter()
         .map(|(_, l)| l.chars().count())
@@ -377,7 +394,7 @@ fn draw_which_key(frame: &mut Frame, area: Rect, menu: &[(char, &str)], typed: &
         width.min(area.width),
         height.min(area.height),
     );
-    frame.render_widget(Clear, rect);
+    Widget::render(Clear, rect, buf);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(t().blue))
@@ -387,7 +404,7 @@ fn draw_which_key(frame: &mut Frame, area: Rect, menu: &[(char, &str)], typed: &
         ))
         .style(Style::new().bg(t().bg_dark));
     let inner = block.inner(rect);
-    block.render(rect, frame.buffer_mut());
+    block.render(rect, buf);
     let lines: Vec<Line> = menu
         .iter()
         .map(|(key, label)| {
@@ -405,7 +422,7 @@ fn draw_which_key(frame: &mut Frame, area: Rect, menu: &[(char, &str)], typed: &
             ])
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    Widget::render(Paragraph::new(lines), inner, buf);
 }
 
 /// Nerd Font icons, unless `FENER_ICONS=plain` (LazyVim assumes a Nerd Font too).

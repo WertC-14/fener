@@ -1,6 +1,6 @@
 [package]
-name = "fener"
-description = "A modal terminal editor in the spirit of LazyVim"
+name = "fener-widgets"
+description = "Ratatui drawing of a fener editor: text, status line, which-key, pickers, file tree"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 fener-core.workspace = true
-fener-widgets.workspace = true
+unicode-width = "0.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 
 [lints]

@@ -5,8 +5,6 @@
 //! synchronized update so the terminal never shows half a frame. Slow work (listing and
 //! searching files for the pickers) runs on worker threads and comes back on the same channel.
 
-mod ui;
-
 use std::io::{self, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +14,7 @@ use std::thread;
 
 use fener_core::picker::{self, Item, Kind};
 use fener_core::{Document, Editor, Key, Mode, Request, State, files};
+use fener_widgets::{THEMES, View};
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
@@ -60,15 +59,15 @@ fn main() -> io::Result<()> {
     let mut editor = Editor::new(doc);
     editor.root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     editor.state = State::load();
-    editor.themes = ui::THEMES.iter().map(|t| t.name).collect();
+    editor.themes = THEMES.iter().map(|t| t.name).collect();
     if let Some(name) = &editor.state.theme {
-        editor.theme = ui::THEMES.iter().position(|t| t.name == name).unwrap_or(0);
+        editor.theme = THEMES.iter().position(|t| t.name == name).unwrap_or(0);
     }
     match &arg {
         Some(path) => editor.remember(Path::new(path)),
         None => editor.dashboard = Some(0),
     }
-    let mut view = ui::View::default();
+    let mut view = View::default();
 
     let mut terminal = ratatui::try_init()?;
     let (tx, rx) = mpsc::channel();
@@ -101,7 +100,11 @@ fn main() -> io::Result<()> {
                 shape = Some(bar);
             }
             let drawn = terminal.draw(|frame| {
-                if let Some((x, y)) = ui::render(frame, &mut editor, &mut view) {
+                let area = frame.area();
+                let theme = &THEMES[editor.theme.min(THEMES.len() - 1)];
+                if let Some((x, y)) =
+                    fener_widgets::render(frame.buffer_mut(), area, &mut editor, &mut view, theme)
+                {
                     frame.set_cursor_position((x, y));
                 }
             });
