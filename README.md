@@ -23,7 +23,7 @@ follows the file: code files get run / build, Markdown files get the reader and 
 | | | | |
 |---|---|---|---|
 | `Space Enter` run (F5), code | `Space b` build / check, code | `Space t` terminal open / close | `Space w` save |
-| `Space m` reader / source, Markdown | `Space h` go to heading, Markdown | | |
+| `Space r` reader / source (read), Markdown | `Space h` go to heading, Markdown | | |
 | `Space Space` find files | `Space /` find text | `Space o` find in file | `Space e` folder tree |
 | `Space 1…9` go to tab (1: files) | `Space s k` all keys | `Space u m` Markdown reader | `Space q q` quit |
 

@@ -2330,7 +2330,7 @@ mod tests {
         // The Space menu of a Markdown file: no run / build, but reader and headings.
         e.handle_key(Key::Char(' '));
         let menu = e.leader_menu().unwrap();
-        assert!(menu.contains(&('m', "Reader / Source (Ctrl+E)")));
+        assert!(menu.contains(&('r', "Reader / Source (Ctrl+E)")));
         assert!(menu.contains(&('h', "Go to Heading")));
         assert!(!menu.iter().any(|(k, _)| *k == '↵' || *k == 'b'));
         // Space h: the headings; picking one scrolls the reader there.

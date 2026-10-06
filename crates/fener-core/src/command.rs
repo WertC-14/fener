@@ -117,7 +117,7 @@ pub const COMMANDS: &[Binding] = &[
     bind_in(
         When::Markdown,
         Command::ToggleReader,
-        "m",
+        "r",
         "Reader / Source (Ctrl+E)",
     ),
     bind_in(When::Markdown, Command::Headings, "h", "Go to Heading"),
