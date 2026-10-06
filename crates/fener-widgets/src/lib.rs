@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use fener_core::command::DASHBOARD;
 use fener_core::picker::{Kind, Picker};
+use fener_core::syntax::{self, Kind as TextKind, Lang};
 use fener_core::text;
 use fener_core::{Command, Editor, Mode};
 use ratatui::buffer::Buffer;
@@ -91,6 +92,9 @@ const TAB_WIDTH: usize = 2;
 pub struct View {
     /// First screen column shown (no wrapping: long lines scroll sideways).
     pub left: usize,
+    /// Highlighting state at the first line on screen, for (document version, that line):
+    /// scanning from the top of the file is needed only when either changes.
+    syntax: Option<(u64, usize, syntax::State)>,
 }
 
 /// Draws `editor` into `area` with `theme`; returns where the terminal cursor goes.
@@ -180,6 +184,13 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         view.left = cursor_screen_col + margin + 1 - width;
     }
     let matches = search_matches(editor, area.height);
+    let lang = editor.doc.path().map_or(Lang::Plain, Lang::from_path);
+    let key = (editor.doc.version(), editor.top);
+    let mut state = match view.syntax {
+        Some((version, top, state)) if (version, top) == key => state,
+        _ => syntax::state_after(lang, rope, editor.top),
+    };
+    view.syntax = Some((key.0, key.1, state));
     let mut cursor = None;
     for row in 0..usize::from(area.height) {
         let line = editor.top + row;
@@ -222,6 +233,7 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         let start = text::line_start(rope, line);
         let len = text::line_len(rope, line);
         let x0 = area.x + gutter as u16 + 1;
+        let kinds = syntax::line_kinds(lang, &text::line_text(rope, line), &mut state);
         let mut col = 0;
         for (i, c) in rope.slice(start..start + len).chars().enumerate() {
             let pos = start + i;
@@ -229,7 +241,7 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
             let visible = col >= view.left && col + w <= view.left + width;
             if visible {
                 let x = x0 + (col - view.left) as u16;
-                let mut style = Style::new().fg(t().fg);
+                let mut style = kind_style(kinds.get(i).copied().unwrap_or(TextKind::Plain));
                 if matches.iter().any(|&(a, b)| pos >= a && pos < b) {
                     style = style.bg(t().bg_search);
                 }
@@ -261,6 +273,23 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         }
     }
     cursor
+}
+
+/// The color of a kind of text (tokyonight's choices: keywords purple, functions blue,
+/// types cyan, strings green, numbers orange, comments dim and italic).
+fn kind_style(kind: TextKind) -> Style {
+    let t = t();
+    match kind {
+        TextKind::Plain => Style::new().fg(t.fg),
+        TextKind::Comment => Style::new().fg(t.fg_dim).add_modifier(Modifier::ITALIC),
+        TextKind::Str => Style::new().fg(t.green),
+        TextKind::Number => Style::new().fg(t.orange),
+        TextKind::Keyword => Style::new().fg(t.magenta),
+        TextKind::Type => Style::new().fg(t.cyan),
+        TextKind::Function => Style::new().fg(t.blue),
+        TextKind::Heading => Style::new().fg(t.blue).add_modifier(Modifier::BOLD),
+        TextKind::Marker => Style::new().fg(t.orange),
+    }
 }
 
 /// Ranges of `last_search` on the lines on screen (when matches are shown).

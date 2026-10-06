@@ -10,6 +10,7 @@ pub mod files;
 pub mod fuzzy;
 pub mod picker;
 pub mod state;
+pub mod syntax;
 pub mod text;
 pub mod tree;
 
