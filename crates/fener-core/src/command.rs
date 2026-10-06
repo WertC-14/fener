@@ -9,6 +9,7 @@ pub enum Command {
     SearchLines,
     Run,
     Build,
+    Headings,
     Terminal,
     RecentFiles,
     FindText,
@@ -33,6 +34,7 @@ impl Command {
             Self::SearchLines => "find-in-file",
             Self::Run => "run",
             Self::Build => "build",
+            Self::Headings => "headings",
             Self::Terminal => "terminal",
             Self::RecentFiles => "recent-files",
             Self::FindText => "find-text",
@@ -57,7 +59,33 @@ impl Command {
     }
 }
 
+/// Where a leader key is offered: the Space menu changes with the open file (code or Markdown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum When {
+    Always,
+    Code,
+    Markdown,
+}
+
+impl When {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Always => "",
+            Self::Code => "code",
+            Self::Markdown => "markdown",
+        }
+    }
+}
+
+/// The bindings offered in `context` (a `Code` or `Markdown` file).
+pub fn bindings(context: When) -> impl Iterator<Item = &'static Binding> {
+    COMMANDS
+        .iter()
+        .filter(move |b| b.when == When::Always || b.when == context)
+}
+
 pub struct Binding {
+    pub when: When,
     pub command: Command,
     /// Keys after Space, as LazyVim has them (`""`: no leader key).
     pub leader: &'static str,
@@ -65,7 +93,17 @@ pub struct Binding {
 }
 
 const fn bind(command: Command, leader: &'static str, label: &'static str) -> Binding {
+    bind_in(When::Always, command, leader, label)
+}
+
+const fn bind_in(
+    when: When,
+    command: Command,
+    leader: &'static str,
+    label: &'static str,
+) -> Binding {
     Binding {
+        when,
         command,
         leader,
         label,
@@ -74,12 +112,19 @@ const fn bind(command: Command, leader: &'static str, label: &'static str) -> Bi
 
 pub const COMMANDS: &[Binding] = &[
     // Space as a "super key": the everyday commands are one key after it.
-    bind(Command::Run, "⏎", "Run (F5)"),
+    bind_in(When::Code, Command::Run, "↵", "Run (F5)"),
+    bind_in(When::Code, Command::Build, "b", "Build / Check (no run)"),
+    bind_in(
+        When::Markdown,
+        Command::ToggleReader,
+        "m",
+        "Reader / Source",
+    ),
+    bind_in(When::Markdown, Command::Headings, "h", "Go to Heading"),
     bind(Command::FindFiles, " ", "Find Files"),
     bind(Command::FindText, "/", "Find Text (Grep)"),
-    bind(Command::Build, "b", "Build / Check (no run)"),
     bind(Command::Explorer, "e", "Explorer (folder tree; Ctrl+B)"),
-    bind(Command::Terminal, "t", "Terminal (Ctrl+/; Tab back up)"),
+    bind(Command::Terminal, "t", "Terminal open / close (Ctrl+/)"),
     bind(Command::Save, "w", "Save (Ctrl+S)"),
     bind(Command::SearchLines, "o", "Find in File (Ctrl+F)"),
     bind(Command::FindFiles, "ff", "Find Files"),

@@ -145,7 +145,9 @@ pub fn render(
     }
     let command_cursor = draw_command_line(buf, command, editor);
     if let Some(menu) = editor.leader_menu() {
-        draw_which_key(buf, body, &menu, &editor.pending_keys());
+        // The title says which menu this is: the keys change with the file (code / Markdown).
+        let title = format!("{} {}", editor.pending_keys(), editor.context().label());
+        draw_which_key(buf, body, &menu, &title);
     }
     if let Some(picker) = &editor.picker {
         return draw_picker(buf, area, picker);

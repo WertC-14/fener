@@ -17,11 +17,13 @@ project's folder tree beside it. `Alt+1` is always back to the files.
 ## Code tabs
 
 You do not need to know the keys: `Space` shows what can follow (which-key), and `Space s k` lists every key and
-runs the one you pick. Space works like a super key; the everyday commands are one key after it:
+runs the one you pick. Space works like a super key; the everyday commands are one key after it. The menu
+follows the file: code files get run / build, Markdown files get the reader and their headings.
 
 | | | | |
 |---|---|---|---|
-| `Space Enter` run (F5) | `Space b` build / check | `Space t` terminal | `Space w` save |
+| `Space Enter` run (F5), code | `Space b` build / check, code | `Space t` terminal open / close | `Space w` save |
+| `Space m` reader / source, Markdown | `Space h` go to heading, Markdown | | |
 | `Space Space` find files | `Space /` find text | `Space o` find in file | `Space e` folder tree |
 | `Space 1…9` go to tab (1: files) | `Space s k` all keys | `Space u m` Markdown reader | `Space q q` quit |
 

@@ -255,12 +255,17 @@ impl App {
                     switch_to = Some(n);
                     continue;
                 }
-                // Space t, Ctrl+/ from the text: to the shell (opened if needed), as LazyVim's
-                // Ctrl+/; inside it Ctrl+/ hides it and Tab goes back up.
+                // Space t, Ctrl+/: open the shell and type there, or close it if it is open.
+                // (Inside the shell Ctrl+/ closes it too; Tab or F6 go up to the text.)
                 Request::ToggleTerminal => {
-                    let root = tab.editor.root.clone();
-                    if open_terminal(tab, &root, &self.tx) {
-                        tab.term_focus = true;
+                    if tab.term_open {
+                        tab.term_open = false;
+                        tab.term_focus = false;
+                    } else {
+                        let root = tab.editor.root.clone();
+                        if open_terminal(tab, &root, &self.tx) {
+                            tab.term_focus = true;
+                        }
                     }
                     continue;
                 }
@@ -349,9 +354,9 @@ impl App {
                 liman_widgets::theme::dim()
             };
             let hint = if tab.term_focus {
-                " Terminal · Tab (empty line) up to the text · Ctrl+/ hide · F5 run again "
+                " Terminal · Tab (empty line) up to the text · Ctrl+/ close · F5 run again "
             } else {
-                " Terminal · Space t or F6 to type here "
+                " Terminal · F6 to type here · Space t close "
             };
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)

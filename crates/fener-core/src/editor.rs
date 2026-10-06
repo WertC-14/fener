@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::command::{COMMANDS, Command, DASHBOARD, GROUPS, VIM_KEYS, leader_label};
+use crate::command::{
+    COMMANDS, Command, DASHBOARD, GROUPS, VIM_KEYS, When, bindings, leader_label,
+};
 use crate::config::{Config, LineNumbers};
 use crate::document::Document;
 use crate::picker::{Item, Kind, Pick, Picker};
@@ -340,6 +342,14 @@ impl Editor {
         }
     }
 
+    /// Code or Markdown: decides which Space keys are offered.
+    pub fn context(&self) -> When {
+        match self.doc.path().map(Lang::from_path) {
+            Some(Lang::Markdown) => When::Markdown,
+            _ => When::Code,
+        }
+    }
+
     /// Keys typed so far for a command in progress (shown at the right of the status line).
     pub fn pending_keys(&self) -> String {
         self.pending.iter().map(key_label).collect()
@@ -353,12 +363,12 @@ impl Editor {
             .iter()
             .filter_map(|k| match k {
                 Key::Char(c) => Some(*c),
-                Key::Enter => Some('⏎'),
+                Key::Enter => Some('↵'),
                 _ => None,
             })
             .collect();
         let mut items: Vec<(char, &'static str)> = Vec::new();
-        for binding in COMMANDS {
+        for binding in bindings(self.context()) {
             if let Some(rest) = binding.leader.strip_prefix(typed.as_str())
                 && let Some(next) = rest.chars().next()
             {
@@ -380,7 +390,7 @@ impl Editor {
             items.push(('1', "1…9  Go to Tab (1: files)"));
         }
         // Enter, Space and the tab digits first, then the letters.
-        let rank = |k: char| ['⏎', ' ', '1'].iter().position(|&f| f == k).unwrap_or(3);
+        let rank = |k: char| ['↵', ' ', '1'].iter().position(|&f| f == k).unwrap_or(3);
         items.sort_by_key(|&(k, _)| (rank(k), k));
         Some(items)
     }
@@ -473,7 +483,7 @@ impl Editor {
         }
         self.pending.push(key);
         self.recording.push(key);
-        let (count, cmd) = match parse(&self.pending) {
+        let (count, cmd) = match parse(&self.pending, self.context()) {
             Parsed::Incomplete => return,
             Parsed::Invalid => {
                 self.pending.clear();
@@ -1008,7 +1018,7 @@ impl Editor {
                     })
                     .collect();
                 user.sort_by(|a, b| a.detail.cmp(&b.detail));
-                let commands = COMMANDS.iter().map(|b| Item {
+                let commands = bindings(self.context()).map(|b| Item {
                     text: b.label.into(),
                     detail: if b.leader.is_empty() {
                         String::new()
@@ -1065,6 +1075,37 @@ impl Editor {
                     })
                     .collect();
                 self.picker = Some(Picker::new(Kind::Lines, "Find in File", items));
+            }
+            Command::Headings => {
+                let path = self.doc.path().map(Path::to_path_buf);
+                let mut fence = false;
+                let mut items = Vec::new();
+                for line in 0..text::line_count(&self.doc.rope) {
+                    let content = text::line_text(&self.doc.rope, line);
+                    let trimmed = content.trim_start();
+                    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                        fence = !fence;
+                    } else if !fence && trimmed.starts_with('#') {
+                        let level = trimmed.chars().take_while(|&c| c == '#').count();
+                        items.push(Item {
+                            // Indented by level, without the #s: an outline.
+                            text: format!(
+                                "{}{}",
+                                "  ".repeat(level.saturating_sub(1)),
+                                trimmed[level..].trim()
+                            ),
+                            detail: (line + 1).to_string(),
+                            pick: match &path {
+                                Some(p) => Pick::File {
+                                    path: p.clone(),
+                                    line: Some(line),
+                                },
+                                None => Pick::Line(line),
+                            },
+                        });
+                    }
+                }
+                self.picker = Some(Picker::new(Kind::Lines, "Headings", items));
             }
             Command::Run => self.run_file(crate::run::Goal::Run),
             Command::Build => self.run_file(crate::run::Goal::Build),
@@ -1332,9 +1373,19 @@ impl Editor {
                     self.search_forward = true;
                 }
                 match pick {
-                    Some((Pick::File { path, line }, ..)) => self.open(&path, line, false),
+                    Some((Pick::File { path, line }, ..)) => {
+                        let same = self.doc.path() == Some(path.as_path());
+                        self.open(&path, line, false);
+                        // A jump inside a Markdown file in the reader scrolls the reader.
+                        if same && self.reader {
+                            self.reader_top = line.unwrap_or(0);
+                        }
+                    }
                     Some((Pick::Line(line), ..)) => {
                         self.cursor = text::first_non_blank(&self.doc.rope, line);
+                        if self.reader {
+                            self.reader_top = line;
+                        }
                     }
                     Some((Pick::Command(command), ..)) => self.run_command(command),
                     Some((Pick::Theme(i), ..)) => {
@@ -1733,13 +1784,13 @@ fn parse_count(keys: &[Key]) -> (Option<usize>, &[Key]) {
     (number.parse().ok(), &keys[digits..])
 }
 
-fn parse(keys: &[Key]) -> Parsed {
+fn parse(keys: &[Key], context: When) -> Parsed {
     let (count, rest) = parse_count(keys);
     let Some(&first) = rest.first() else {
         return Parsed::Incomplete;
     };
     if first == Key::Char(' ') {
-        return parse_leader(&rest[1..]);
+        return parse_leader(&rest[1..], context);
     }
     if let Some(op) = operator_of(first) {
         let (count2, rest) = parse_count(&rest[1..]);
@@ -1939,28 +1990,22 @@ fn parse_action(keys: &[Key]) -> Parsed {
     }
 }
 
-fn parse_leader(keys: &[Key]) -> Parsed {
+fn parse_leader(keys: &[Key], context: When) -> Parsed {
     let mut typed = String::new();
     for key in keys {
         match key {
             Key::Char(c) => typed.push(*c),
-            Key::Enter => typed.push('⏎'),
+            Key::Enter => typed.push('↵'),
             _ => return Parsed::Invalid,
         }
     }
     if let Some(n) = typed.parse::<usize>().ok().filter(|n| (1..=9).contains(n)) {
         return Parsed::Done(None, Cmd::GoTab(n));
     }
-    if let Some(b) = COMMANDS
-        .iter()
-        .find(|b| !b.leader.is_empty() && b.leader == typed)
-    {
+    if let Some(b) = bindings(context).find(|b| !b.leader.is_empty() && b.leader == typed) {
         return Parsed::Done(None, Cmd::Leader(b.command));
     }
-    if COMMANDS
-        .iter()
-        .any(|b| b.leader.starts_with(typed.as_str()))
-    {
+    if bindings(context).any(|b| b.leader.starts_with(typed.as_str())) {
         Parsed::Incomplete
     } else {
         Parsed::Invalid
@@ -2142,7 +2187,7 @@ mod tests {
         assert_eq!(
             e.leader_menu(),
             Some(vec![
-                ('⏎', "Run (F5)"),
+                ('↵', "Run (F5)"),
                 (' ', "Find Files"),
                 ('1', "1…9  Go to Tab (1: files)"),
                 ('/', "Find Text (Grep)"),
@@ -2152,7 +2197,7 @@ mod tests {
                 ('o', "Find in File (Ctrl+F)"),
                 ('q', "+quit/session"),
                 ('s', "+search"),
-                ('t', "Terminal (Ctrl+/; Tab back up)"),
+                ('t', "Terminal open / close (Ctrl+/)"),
                 ('u', "+ui"),
                 ('w', "Save (Ctrl+S)")
             ])
@@ -2228,6 +2273,17 @@ mod tests {
             e.handle_key(k);
         }
         assert!(e.reader);
+        // The Space menu of a Markdown file: no run / build, but reader and headings.
+        e.handle_key(Key::Char(' '));
+        let menu = e.leader_menu().unwrap();
+        assert!(menu.contains(&('m', "Reader / Source")));
+        assert!(menu.contains(&('h', "Go to Heading")));
+        assert!(!menu.iter().any(|(k, _)| *k == '↵' || *k == 'b'));
+        // Space h: the headings; picking one scrolls the reader there.
+        e.handle_key(Key::Char('h'));
+        assert_eq!(e.picker.as_ref().unwrap().items[0].text, "A");
+        e.handle_key(Key::Enter);
+        assert_eq!(e.reader_top, 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
