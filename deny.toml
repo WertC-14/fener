@@ -1,6 +1,6 @@
-# fener is GPL-3.0 (fm-research ADR 0010): GPL-compatible licenses only.
+# fener is MIT (fm-research ADR 0011): no GPL/LGPL/AGPL code or dependencies.
 [licenses]
-allow = ["GPL-3.0-or-later", "GPL-3.0", "MIT", "CC0-1.0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "MPL-2.0"]
+allow = ["MIT", "CC0-1.0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016"]
 confidence-threshold = 0.9
 
 [bans]

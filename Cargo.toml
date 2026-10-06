@@ -6,7 +6,7 @@ members = ["crates/fener-core", "crates/fener"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-license = "GPL-3.0-or-later"
+license = "MIT"
 repository = "https://github.com/WertC-14/fener"
 
 [workspace.dependencies]
