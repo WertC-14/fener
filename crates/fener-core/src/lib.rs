@@ -11,6 +11,7 @@ pub mod fuzzy;
 pub mod picker;
 pub mod state;
 pub mod text;
+pub mod tree;
 
 pub use command::Command;
 pub use document::{Document, Edit};

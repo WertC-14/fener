@@ -14,6 +14,7 @@ use crate::document::Document;
 use crate::picker::{Item, Kind, Pick, Picker};
 use crate::state::State;
 use crate::text;
+use crate::tree::{self, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -236,6 +237,9 @@ pub struct Editor {
     /// Names of the themes the UI has, and the one in use (index).
     pub themes: Vec<&'static str>,
     pub theme: usize,
+    /// The folder tree on the left (`Space e`), and whether keys go to it.
+    pub tree: Option<Tree>,
+    pub tree_focus: bool,
 }
 
 impl Editor {
@@ -271,6 +275,8 @@ impl Editor {
             state: State::default(),
             themes: Vec::new(),
             theme: 0,
+            tree: None,
+            tree_focus: false,
         }
     }
 
@@ -366,6 +372,25 @@ impl Editor {
             && self.dashboard_key(key)
         {
             return;
+        }
+        if self.mode == Mode::Normal && self.pending.is_empty() {
+            match key {
+                Key::Ctrl('h') if self.tree.is_some() => {
+                    self.tree_focus = true;
+                    return;
+                }
+                Key::Ctrl('l') => {
+                    self.tree_focus = false;
+                    return;
+                }
+                // Space (leader) and `:` work from the tree too.
+                Key::Char(' ' | ':') => {}
+                _ if self.tree_focus && self.tree.is_some() => {
+                    self.tree_key(key);
+                    return;
+                }
+                _ => {}
+            }
         }
         match self.mode {
             Mode::Normal => self.normal_key(key),
@@ -936,6 +961,14 @@ impl Editor {
                 p.theme_before = self.theme;
                 self.picker = Some(p);
             }
+            Command::Explorer => {
+                if self.tree.is_some() {
+                    self.tree = None;
+                    self.tree_focus = false;
+                } else {
+                    self.show_tree(true);
+                }
+            }
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
             Command::Quit => self.ex("qa"),
@@ -963,6 +996,9 @@ impl Editor {
             }
         }
         self.dashboard = None;
+        if let Some(tree) = &mut self.tree {
+            tree.reveal(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+        }
         if let Some(line) = line {
             let line = line.min(text::line_count(&self.doc.rope) - 1);
             self.cursor = text::first_non_blank(&self.doc.rope, line);
@@ -970,6 +1006,57 @@ impl Editor {
             self.top = line.saturating_sub(self.view_height / 2);
         }
         self.remember(path);
+    }
+
+    /// Opens the folder tree at the open file's project (or `root`), with the file revealed.
+    pub fn show_tree(&mut self, focus: bool) {
+        let file = self
+            .doc
+            .path()
+            .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+        let root = match &file {
+            Some(f) => tree::project_root(f),
+            None => std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone()),
+        };
+        let mut t = Tree::new(root);
+        if let Some(f) = &file {
+            t.reveal(f);
+        }
+        self.tree = Some(t);
+        self.tree_focus = focus;
+        self.dashboard = None;
+    }
+
+    /// A key while the tree has the focus.
+    fn tree_key(&mut self, key: Key) {
+        let Some(t) = &mut self.tree else {
+            return;
+        };
+        match key {
+            Key::Char('j') | Key::Down => t.move_by(1),
+            Key::Char('k') | Key::Up => t.move_by(-1),
+            Key::Char('g') | Key::Home => t.selected = 0,
+            Key::Char('G') | Key::End => t.move_by(isize::MAX / 2),
+            Key::Ctrl('d') => t.move_by(self.view_height as isize / 2),
+            Key::Ctrl('u') => t.move_by(-(self.view_height as isize / 2)),
+            Key::Enter | Key::Char('l' | 'o') | Key::Right => {
+                if let Some(path) = t.activate() {
+                    self.open(&path, None, false);
+                    if self.doc.path() == Some(path.as_path()) {
+                        self.tree_focus = false;
+                    }
+                }
+            }
+            Key::Char('h') | Key::Left => t.collapse(),
+            Key::Backspace | Key::Char('-') => t.root_up(),
+            Key::Char('R') => t.rebuild(),
+            Key::Char('q') => {
+                self.tree = None;
+                self.tree_focus = false;
+            }
+            Key::Esc => self.tree_focus = false,
+            _ => {}
+        }
     }
 
     /// Adds `path` to the recent files.
@@ -1862,6 +1949,7 @@ mod tests {
             Some(vec![
                 (' ', "Find Files"),
                 ('/', "Find Text (Grep)"),
+                ('e', "Explorer (folder tree)"),
                 ('f', "+file/find"),
                 ('q', "+quit/session"),
                 ('s', "+search"),
@@ -1886,6 +1974,34 @@ mod tests {
             e.handle_key(k);
         }
         assert!(e.quit);
+    }
+
+    #[test]
+    fn tree_opens_files_and_hands_focus_back() {
+        let dir = std::env::temp_dir().join(format!("fener-ed-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("a.txt"), "aaa\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "bbb\n").unwrap();
+        let mut e = Editor::new(Document::open(&dir.join("a.txt")).unwrap());
+        for k in keys("<Space>e") {
+            e.handle_key(k);
+        }
+        assert!(e.tree_focus);
+        assert_eq!(
+            e.tree.as_ref().unwrap().selected_row().unwrap().name,
+            "a.txt"
+        );
+        for k in keys("j<CR>") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.doc.rope.to_string(), "bbb\n");
+        assert!(!e.tree_focus && e.tree.is_some());
+        // Ctrl+H back to the tree, q closes it.
+        e.handle_key(Key::Ctrl('h'));
+        e.handle_key(Key::Char('q'));
+        assert!(e.tree.is_none() && !e.tree_focus);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

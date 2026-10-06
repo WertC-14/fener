@@ -5,6 +5,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     FindFiles,
+    Explorer,
     RecentFiles,
     FindText,
     NewFile,
@@ -36,6 +37,7 @@ const fn bind(command: Command, leader: &'static str, label: &'static str) -> Bi
 pub const COMMANDS: &[Binding] = &[
     bind(Command::FindFiles, " ", "Find Files"),
     bind(Command::FindText, "/", "Find Text (Grep)"),
+    bind(Command::Explorer, "e", "Explorer (folder tree)"),
     bind(Command::FindFiles, "ff", "Find Files"),
     bind(Command::RecentFiles, "fr", "Recent Files"),
     bind(Command::NewFile, "fn", "New File"),
@@ -67,6 +69,7 @@ pub const DASHBOARD: &[(char, &str, Command)] = &[
     ('f', "Find File", Command::FindFiles),
     ('n', "New File", Command::NewFile),
     ('g', "Find Text", Command::FindText),
+    ('e', "Explorer", Command::Explorer),
     ('r', "Recent Files", Command::RecentFiles),
     ('t', "Themes", Command::Themes),
     ('?', "Keymaps", Command::Keymaps),
@@ -110,6 +113,7 @@ pub const VIM_KEYS: &[(&str, &str)] = &[
     (":w", "Save"),
     (":q", "Quit (:q! without saving)"),
     (":e FILE", "Open a file (:e! drops changes)"),
+    ("Ctrl+H Ctrl+L", "To the folder tree / back to the text"),
 ];
 
 /// How a leader key sequence is written for people: `␣ f f`.

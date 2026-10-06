@@ -12,6 +12,7 @@ every key and runs the one you pick.
 ![The start screen](docs/img/dashboard.png)
 ![Find Files: a fuzzy picker](docs/img/find-files.png)
 ![Keymaps: every key, searchable; Enter runs it](docs/img/keymaps.png)
+![The folder tree (Space e)](docs/img/tree.png)
 ![fener: Visual mode, relative line numbers, lualine-like status line](docs/img/normal.png)
 ![The Space leader with its which-key box](docs/img/which-key.png)
 
@@ -23,6 +24,9 @@ every key and runs the one you pick.
   Recent Files (`Space f r`), Find Text / grep (`Space /`, `Space s g`), Keymaps (`Space s k`),
   Colorschemes with live preview (`Space u C`): tokyonight night/storm/moon/day,
   catppuccin-mocha, gruvbox
+- A folder tree on the left (`Space e`): the project the file is in (its git repository), the file
+  revealed; `Ctrl+H` / `Ctrl+L` between the tree and the text, `Enter`/`l` open, `h` close,
+  `Backspace` shows the folder above
 - Open, edit and save a file: `fener FILE`, `:e FILE`, `:w`, `:q`, `:wq`, `:x`, `:q!`, `Ctrl+S`
 - Vim's language: `[count] [operator [count]] (motion | text object)`
   - motions: `h j k l`, `w W b B e E`, `0 ^ $`, `gg G` (`5G`), `f t F T ; ,`, `{ }`, `%`, `n N`, `*`
@@ -36,7 +40,7 @@ every key and runs the one you pick.
 
 ## Not yet (on purpose)
 
-LSP, tree-sitter, plugins, file tree, multiple buffers and windows, a config file, Obsidian vault.
+LSP, tree-sitter, plugins, multiple buffers and windows, a config file, Obsidian vault.
 Find Files does not read `.gitignore` yet (hidden folders, `target`, `node_modules` are skipped).
 They come one by one; see fm-research ADR 0010.
 
