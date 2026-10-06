@@ -55,6 +55,10 @@ pub struct CodeTabs {
     generation: Arc<AtomicU64>,
     /// Tests set this: recent files are not written to the real home folder.
     pub(super) no_state: bool,
+    /// `~/.config/fener/config.toml` (ADR 0013), applied to every new code tab.
+    pub config: fener_core::config::Config,
+    /// What was wrong with the config file; shown once, in the first code tab.
+    pub config_error: Option<String>,
 }
 
 impl CodeTabs {
@@ -96,9 +100,14 @@ impl App {
         let mut editor = Editor::new(doc);
         editor.root = tree::project_root(&path);
         editor.state = State::load();
-        // The folder the file is in, beside it (the user asked to see it; fener alone keeps
-        // the tree closed, as LazyVim).
-        editor.show_tree(false);
+        editor.apply_config(&self.code.config);
+        if let Some(error) = self.code.config_error.take() {
+            editor.message = Some(format!("Config ignored: {error}"));
+        }
+        // The project's folder tree beside the file (`[editor] tree-open`).
+        if self.code.config.editor.tree_open {
+            editor.show_tree(false);
+        }
         editor.remember(&path);
         self.code.next_id += 1;
         self.code.tabs.push(CodeTab {

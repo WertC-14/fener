@@ -23,6 +23,38 @@ pub enum Command {
     ClearSearch,
 }
 
+impl Command {
+    /// The name used in the config file's `[keys]` table (`run`, `find-files`, ...).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FindFiles => "find-files",
+            Self::Explorer => "explorer",
+            Self::SearchLines => "find-in-file",
+            Self::Run => "run",
+            Self::Terminal => "terminal",
+            Self::RecentFiles => "recent-files",
+            Self::FindText => "find-text",
+            Self::NewFile => "new-file",
+            Self::Keymaps => "keymaps",
+            Self::Themes => "themes",
+            Self::Dashboard => "dashboard",
+            Self::Save => "save",
+            Self::Quit => "quit",
+            Self::ToggleNumbers => "toggle-numbers",
+            Self::ToggleReader => "toggle-reader",
+            Self::ToggleRelativeNumbers => "toggle-relative-numbers",
+            Self::ClearSearch => "clear-search",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        COMMANDS
+            .iter()
+            .map(|b| b.command)
+            .find(|c| c.name() == name)
+    }
+}
+
 pub struct Binding {
     pub command: Command,
     /// Keys after Space, as LazyVim has them (`""`: no leader key).

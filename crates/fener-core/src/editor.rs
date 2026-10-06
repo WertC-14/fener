@@ -7,9 +7,11 @@
 //! LazyVim-style leader commands; while one is being typed, [`Editor::leader_menu`] lists what can
 //! follow (which-key).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::command::{COMMANDS, Command, DASHBOARD, GROUPS, VIM_KEYS, leader_label};
+use crate::config::{Config, LineNumbers};
 use crate::document::Document;
 use crate::picker::{Item, Kind, Pick, Picker};
 use crate::state::State;
@@ -175,9 +177,6 @@ enum Parsed {
 
 /// Lines kept visible above and below the cursor (LazyVim: `scrolloff = 4`).
 const SCROLL_OFF: usize = 4;
-/// Spaces per indent level (LazyVim: `shiftwidth = 2`, `expandtab`).
-const INDENT: &str = "  ";
-
 /// Work the editor asks the app to do (it has the threads and the disk).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -251,6 +250,12 @@ pub struct Editor {
     /// the first source line on screen.
     pub reader: bool,
     pub reader_top: usize,
+    /// Spaces per indent level (`[editor] indent`; LazyVim: `shiftwidth = 2`).
+    pub indent: usize,
+    /// Keys from the config file's `[keys]`, checked before the built-in ones.
+    pub keymap: HashMap<Key, Command>,
+    /// The config file (`[run]` commands, options for new tabs).
+    pub config: Config,
 }
 
 impl Editor {
@@ -292,6 +297,9 @@ impl Editor {
             tree_focus: false,
             reader: false,
             reader_top: 0,
+            indent: 2,
+            keymap: HashMap::new(),
+            config: Config::default(),
         }
         .reader_for_markdown()
     }
@@ -397,6 +405,9 @@ impl Editor {
             return;
         }
         if self.mode == Mode::Normal && self.pending.is_empty() {
+            if let Some(&command) = self.keymap.get(&key) {
+                return self.run_command(command);
+            }
             match key {
                 Key::Ctrl('h') if self.tree.is_some() => {
                     self.tree_focus = true;
@@ -715,14 +726,14 @@ impl Editor {
                     let content = text::line_text(&self.doc.rope, line);
                     if op == Operator::Indent {
                         if !content.is_empty() {
-                            self.doc.edit(start, start, INDENT);
+                            self.doc.edit(start, start, &" ".repeat(self.indent));
                         }
                     } else {
                         let blank = content
                             .chars()
                             .take_while(|c| *c == ' ')
                             .count()
-                            .min(INDENT.len());
+                            .min(self.indent);
                         let tab = usize::from(blank == 0 && content.starts_with('\t'));
                         self.doc.edit(start, start + blank + tab, "");
                     }
@@ -970,6 +981,22 @@ impl Editor {
                 }
             }
             Command::Keymaps => {
+                // The config file's keys first, so a changed key is easy to see.
+                let mut user: Vec<Item> = self
+                    .config
+                    .keys
+                    .iter()
+                    .filter_map(|(key, name)| {
+                        let command = Command::from_name(name)?;
+                        let label = COMMANDS.iter().find(|b| b.command == command)?.label;
+                        Some(Item {
+                            text: format!("{label} (config)"),
+                            detail: key.clone(),
+                            pick: Pick::Command(command),
+                        })
+                    })
+                    .collect();
+                user.sort_by(|a, b| a.detail.cmp(&b.detail));
                 let commands = COMMANDS.iter().map(|b| Item {
                     text: b.label.into(),
                     detail: if b.leader.is_empty() {
@@ -984,7 +1011,7 @@ impl Editor {
                     detail: (*keys).into(),
                     pick: Pick::Info,
                 });
-                let items = commands.chain(vim).collect();
+                let items = user.into_iter().chain(commands).chain(vim).collect();
                 self.picker = Some(Picker::new(Kind::Keymaps, "Keymaps", items));
             }
             Command::Themes => {
@@ -1034,7 +1061,14 @@ impl Editor {
                     return;
                 };
                 let file = std::path::absolute(&path).unwrap_or(path);
-                match crate::run::command_for(&file) {
+                let configured = self
+                    .config
+                    .run_command(&file)
+                    .map(|command| crate::run::Run {
+                        dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
+                        command,
+                    });
+                match configured.or_else(|| crate::run::command_for(&file)) {
                     Some(run) => {
                         if self.doc.is_modified() {
                             self.save(None);
@@ -1090,6 +1124,18 @@ impl Editor {
             self.top = line.saturating_sub(self.view_height / 2);
         }
         self.remember(path);
+    }
+
+    /// Takes the config file's settings (line numbers, indent, keys, `[run]`).
+    pub fn apply_config(&mut self, config: &Config) {
+        (self.number, self.relative_number) = match config.editor.line_numbers {
+            LineNumbers::Absolute => (true, false),
+            LineNumbers::Relative => (true, true),
+            LineNumbers::Off => (false, false),
+        };
+        self.indent = config.editor.indent.clamp(1, 16);
+        self.keymap = config.keymap();
+        self.config = config.clone();
     }
 
     /// Opens the folder tree at the open file's project (or `root`), with the file revealed.
@@ -1376,8 +1422,9 @@ impl Editor {
                 self.cursor += 1;
             }
             Key::Tab => {
-                self.doc.edit(self.cursor, self.cursor, INDENT);
-                self.cursor += INDENT.len();
+                self.doc
+                    .edit(self.cursor, self.cursor, &" ".repeat(self.indent));
+                self.cursor += self.indent;
             }
             Key::Enter => {
                 // New line with the indentation of this one (autoindent).

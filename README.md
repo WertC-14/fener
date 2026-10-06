@@ -46,6 +46,28 @@ The file manager itself is liman's: grid / normal / detailed views, Places, prev
 tabs, themes. Its guide: [liman's KILAVUZ](https://github.com/WertC-14/liman/blob/main/docs/KILAVUZ.md).
 Settings are shared with liman (`~/.config/liman/config`).
 
+## Settings
+
+`~/.config/fener/config.toml` (all optional; a mistake is reported in the first code tab and ignored):
+
+```toml
+[editor]
+line-numbers = "absolute"   # absolute | relative | off
+indent = 4                  # spaces per indent level (Tab, >>)
+tree-open = true            # the folder tree beside a newly opened file
+
+[run]                       # what F5 runs, by file extension: {file} {stem} {dir}
+rs = "rustc {file} && ./{stem}"
+py = "python3 -i {file}"
+
+[keys]                      # key = command; they show up first in Keymaps (Space s k)
+F9 = "run"
+ctrl-t = "terminal"
+```
+
+Commands: `run`, `terminal`, `explorer`, `find-files`, `find-in-file`, `find-text`, `recent-files`, `keymaps`,
+`themes`, `save`, `quit`, `toggle-reader`, `toggle-numbers`, `toggle-relative-numbers`, `clear-search`, `new-file`.
+
 ## Not yet (on purpose)
 
 LSP, tree-sitter, plugins, split windows, a config file for the editor, Obsidian vault.

@@ -93,6 +93,8 @@ fn main() -> io::Result<()> {
     fener_widgets::set_nerd(nerd);
     let mut app = App::new(cwd, Places::detect(&home), tx);
     app.apply_settings(&settings);
+    // The editor's settings (ADR 0013); a broken file is reported in the first code tab.
+    (app.code.config, app.code.config_error) = fener_core::config::Config::load();
     if let Some(file) = &file {
         app.open_code_tab(file);
     }

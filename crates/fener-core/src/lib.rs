@@ -4,6 +4,7 @@
 //! No terminal library here; the `fener` crate draws and feeds keys.
 
 pub mod command;
+pub mod config;
 pub mod document;
 pub mod editor;
 pub mod files;
