@@ -3,9 +3,16 @@
 //!
 //! No terminal library here; the `fener` crate draws and feeds keys.
 
+pub mod command;
 pub mod document;
 pub mod editor;
+pub mod files;
+pub mod fuzzy;
+pub mod picker;
+pub mod state;
 pub mod text;
 
+pub use command::Command;
 pub use document::{Document, Edit};
-pub use editor::{Editor, Key, Mode};
+pub use editor::{Editor, Key, Mode, Request};
+pub use state::State;

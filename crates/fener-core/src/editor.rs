@@ -7,7 +7,12 @@
 //! LazyVim-style leader commands; while one is being typed, [`Editor::leader_menu`] lists what can
 //! follow (which-key).
 
+use std::path::{Path, PathBuf};
+
+use crate::command::{COMMANDS, Command, DASHBOARD, GROUPS, VIM_KEYS, leader_label};
 use crate::document::Document;
+use crate::picker::{Item, Kind, Pick, Picker};
+use crate::state::State;
 use crate::text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -152,7 +157,7 @@ enum Cmd {
     Move(Motion),
     Operate(Operator, Target),
     Act(Action),
-    Leader(&'static str),
+    Leader(Command),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -164,18 +169,21 @@ enum Parsed {
     Done(Option<usize>, Cmd),
 }
 
-/// Leader (Space) commands as LazyVim has them, and the names of their groups.
-const LEADER: &[(&str, &str)] = &[
-    ("qq", "Quit all"),
-    ("ul", "Toggle line numbers"),
-    ("uL", "Toggle relative numbers"),
-];
-const LEADER_GROUPS: &[(&str, &str)] = &[("q", "+quit/session"), ("u", "+ui")];
-
 /// Lines kept visible above and below the cursor (LazyVim: `scrolloff = 4`).
 const SCROLL_OFF: usize = 4;
 /// Spaces per indent level (LazyVim: `shiftwidth = 2`, `expandtab`).
 const INDENT: &str = "  ";
+
+/// Work the editor asks the app to do (it has the threads and the disk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    /// List the files under `root` for the Files picker.
+    ListFiles,
+    /// Search the files under `root` for this text, for the Grep picker.
+    Grep(String),
+    /// `state` changed (recent files, theme): write it.
+    SaveState,
+}
 
 /// Text yanked or deleted, and whether it was whole lines.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -217,6 +225,17 @@ pub struct Editor {
     pub number: bool,
     pub relative_number: bool,
     pub quit: bool,
+    /// The start screen is shown, with this menu row selected.
+    pub dashboard: Option<usize>,
+    pub picker: Option<Picker>,
+    /// Taken and done by the app after each key.
+    pub requests: Vec<Request>,
+    /// The folder Find Files and Find Text search.
+    pub root: PathBuf,
+    pub state: State,
+    /// Names of the themes the UI has, and the one in use (index).
+    pub themes: Vec<&'static str>,
+    pub theme: usize,
 }
 
 impl Editor {
@@ -245,6 +264,13 @@ impl Editor {
             number: true,
             relative_number: true,
             quit: false,
+            dashboard: None,
+            picker: None,
+            requests: Vec::new(),
+            root: PathBuf::from("."),
+            state: State::default(),
+            themes: Vec::new(),
+            theme: 0,
         }
     }
 
@@ -290,15 +316,15 @@ impl Editor {
             })
             .collect();
         let mut items: Vec<(char, &'static str)> = Vec::new();
-        for (keys, label) in LEADER {
-            if let Some(rest) = keys.strip_prefix(typed.as_str())
+        for binding in COMMANDS {
+            if let Some(rest) = binding.leader.strip_prefix(typed.as_str())
                 && let Some(next) = rest.chars().next()
             {
                 let label = if rest.chars().count() == 1 {
-                    *label
+                    binding.label
                 } else {
-                    let group = &keys[..typed.len() + next.len_utf8()];
-                    LEADER_GROUPS
+                    let group = &binding.leader[..typed.len() + next.len_utf8()];
+                    GROUPS
                         .iter()
                         .find(|(g, _)| *g == group)
                         .map_or("+more", |(_, name)| *name)
@@ -329,6 +355,17 @@ impl Editor {
     pub fn handle_key(&mut self, key: Key) {
         if !self.replaying {
             self.message = None;
+        }
+        if self.picker.is_some() {
+            self.picker_key(key);
+            return;
+        }
+        if self.dashboard.is_some()
+            && self.mode == Mode::Normal
+            && self.pending.is_empty()
+            && self.dashboard_key(key)
+        {
+            return;
         }
         match self.mode {
             Mode::Normal => self.normal_key(key),
@@ -384,7 +421,7 @@ impl Editor {
             }
             Cmd::Operate(op, target) => self.operate(op, target, n, count),
             Cmd::Act(action) => self.act(action, n),
-            Cmd::Leader(name) => self.leader(name),
+            Cmd::Leader(command) => self.run_command(command),
         }
     }
 
@@ -831,12 +868,248 @@ impl Editor {
         }
     }
 
-    fn leader(&mut self, name: &str) {
-        match name {
-            "Quit all" => self.ex("qa"),
-            "Toggle line numbers" => self.number = !self.number,
-            "Toggle relative numbers" => self.relative_number = !self.relative_number,
+    pub fn run_command(&mut self, command: Command) {
+        match command {
+            Command::FindFiles => {
+                let mut p = Picker::new(Kind::Files, "Find Files", Vec::new());
+                p.loading = true;
+                self.picker = Some(p);
+                self.requests.push(Request::ListFiles);
+            }
+            Command::RecentFiles => {
+                let items = self
+                    .state
+                    .recent
+                    .iter()
+                    .filter(|p| p.exists())
+                    .map(|path| Item {
+                        text: self.display_path(path),
+                        detail: String::new(),
+                        pick: Pick::File {
+                            path: path.clone(),
+                            line: None,
+                        },
+                    })
+                    .collect();
+                self.picker = Some(Picker::new(Kind::Recent, "Recent Files", items));
+            }
+            Command::FindText => self.picker = Some(Picker::new(Kind::Grep, "Grep", Vec::new())),
+            Command::NewFile => {
+                if self.doc.is_modified() {
+                    self.message = Some(NOT_SAVED.into());
+                } else {
+                    self.load(Document::new(""));
+                    self.enter_insert();
+                }
+            }
+            Command::Keymaps => {
+                let commands = COMMANDS.iter().map(|b| Item {
+                    text: b.label.into(),
+                    detail: if b.leader.is_empty() {
+                        String::new()
+                    } else {
+                        leader_label(b.leader)
+                    },
+                    pick: Pick::Command(b.command),
+                });
+                let vim = VIM_KEYS.iter().map(|(keys, label)| Item {
+                    text: (*label).into(),
+                    detail: (*keys).into(),
+                    pick: Pick::Info,
+                });
+                let items = commands.chain(vim).collect();
+                self.picker = Some(Picker::new(Kind::Keymaps, "Keymaps", items));
+            }
+            Command::Themes => {
+                let items = self
+                    .themes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| Item {
+                        text: (*name).into(),
+                        detail: String::new(),
+                        pick: Pick::Theme(i),
+                    })
+                    .collect();
+                let mut p = Picker::new(Kind::Themes, "Colorschemes", items);
+                p.selected = self.theme.min(p.matches.len().saturating_sub(1));
+                p.theme_before = self.theme;
+                self.picker = Some(p);
+            }
+            Command::Dashboard => self.dashboard = Some(0),
+            Command::Save => self.save(None),
+            Command::Quit => self.ex("qa"),
+            Command::ToggleNumbers => self.number = !self.number,
+            Command::ToggleRelativeNumbers => self.relative_number = !self.relative_number,
+            Command::ClearSearch => self.highlight_search = false,
+        }
+    }
+
+    /// Opens `path` (at 0-based `line`) in place of the current document, unless that has
+    /// unsaved changes and `force` is off.
+    pub fn open(&mut self, path: &Path, line: Option<usize>, force: bool) {
+        let same = self.doc.path().is_some_and(|p| p == path);
+        if !same || force {
+            if self.doc.is_modified() && !force {
+                self.message = Some(NOT_SAVED.into());
+                return;
+            }
+            match Document::open(path) {
+                Ok(doc) => self.load(doc),
+                Err(e) => {
+                    self.message = Some(format!("Cannot open \"{}\": {e}", path.display()));
+                    return;
+                }
+            }
+        }
+        self.dashboard = None;
+        if let Some(line) = line {
+            let line = line.min(text::line_count(&self.doc.rope) - 1);
+            self.cursor = text::first_non_blank(&self.doc.rope, line);
+            // Show a jumped-to line in the middle, as Vim does for a far jump.
+            self.top = line.saturating_sub(self.view_height / 2);
+        }
+        self.remember(path);
+    }
+
+    /// Adds `path` to the recent files.
+    pub fn remember(&mut self, path: &Path) {
+        self.state.remember(path);
+        self.requests.push(Request::SaveState);
+    }
+
+    /// The list the worker made for the picker of `kind`, for the query `query` (grep).
+    /// Ignored when that picker is no longer open or the query changed meanwhile.
+    pub fn receive(&mut self, kind: Kind, query: &str, items: Vec<Item>) {
+        if let Some(p) = &mut self.picker
+            && p.kind == kind
+            && (kind != Kind::Grep || p.query == query)
+        {
+            p.set_items(items);
+        }
+    }
+
+    /// A path for people: relative to `root` when inside it, `~/...` in the home folder.
+    pub fn display_path(&self, path: &Path) -> String {
+        let root = std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone());
+        if let Ok(rel) = path.strip_prefix(&root) {
+            return rel.display().to_string();
+        }
+        if let Some(home) = std::env::var_os("HOME")
+            && let Ok(rel) = path.strip_prefix(&home)
+        {
+            return format!("~/{}", rel.display());
+        }
+        path.display().to_string()
+    }
+
+    /// Replaces the document; the cursor and the view start over.
+    fn load(&mut self, doc: Document) {
+        self.doc = doc;
+        self.cursor = 0;
+        self.anchor = 0;
+        self.top = 0;
+        self.mode = Mode::Normal;
+        self.desired_col = None;
+        self.pending.clear();
+        self.dashboard = None;
+    }
+
+    /// A key on the start screen; `false` when it is not the menu's (Space, `:` go on as usual).
+    fn dashboard_key(&mut self, key: Key) -> bool {
+        let selected = self.dashboard.unwrap_or(0);
+        match key {
+            Key::Char('j') | Key::Down | Key::Tab => {
+                self.dashboard = Some((selected + 1) % DASHBOARD.len());
+            }
+            Key::Char('k') | Key::Up => {
+                self.dashboard = Some((selected + DASHBOARD.len() - 1) % DASHBOARD.len());
+            }
+            Key::Enter => self.run_command(DASHBOARD[selected].2),
+            Key::Esc => self.dashboard = None,
+            Key::Char(c) => match DASHBOARD.iter().position(|(k, _, _)| *k == c) {
+                Some(i) => {
+                    self.dashboard = Some(i);
+                    self.run_command(DASHBOARD[i].2);
+                }
+                None => return false,
+            },
             _ => {}
+        }
+        true
+    }
+
+    fn picker_key(&mut self, key: Key) {
+        let Some(p) = &mut self.picker else {
+            return;
+        };
+        let mut query_changed = false;
+        match key {
+            Key::Esc | Key::Ctrl('c') => {
+                if p.kind == Kind::Themes {
+                    self.theme = p.theme_before;
+                }
+                self.picker = None;
+                return;
+            }
+            Key::Enter => {
+                let pick = p
+                    .current()
+                    .map(|item| (item.pick.clone(), item.detail.clone(), item.text.clone()));
+                self.picker = None;
+                match pick {
+                    Some((Pick::File { path, line }, ..)) => self.open(&path, line, false),
+                    Some((Pick::Command(command), ..)) => self.run_command(command),
+                    Some((Pick::Theme(i), ..)) => {
+                        self.theme = i;
+                        self.state.theme = self.themes.get(i).map(|n| (*n).to_string());
+                        self.requests.push(Request::SaveState);
+                    }
+                    Some((Pick::Info, keys, text)) => {
+                        self.message = Some(format!("{keys}  {text}"))
+                    }
+                    None => {}
+                }
+                return;
+            }
+            Key::Up | Key::Ctrl('p' | 'k') => p.move_by(-1),
+            Key::Down | Key::Tab | Key::Ctrl('n' | 'j') => p.move_by(1),
+            Key::Backspace => query_changed = p.query.pop().is_some(),
+            Key::Ctrl('u') => {
+                query_changed = !p.query.is_empty();
+                p.query.clear();
+            }
+            Key::Ctrl('w') => {
+                let keep = p.query.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                query_changed = keep < p.query.len();
+                p.query.truncate(keep);
+            }
+            Key::Char(c) => {
+                p.query.push(c);
+                query_changed = true;
+            }
+            _ => {}
+        }
+        if query_changed {
+            p.selected = 0;
+            if p.kind == Kind::Grep {
+                p.loading = !p.query.is_empty();
+                if p.query.is_empty() {
+                    p.set_items(Vec::new());
+                } else {
+                    self.requests.push(Request::Grep(p.query.clone()));
+                }
+            } else {
+                p.refilter();
+            }
+        }
+        // Themes are tried on while moving through the list.
+        if let Some(Item {
+            pick: Pick::Theme(i),
+            ..
+        }) = p.current()
+        {
+            self.theme = *i;
         }
     }
 
@@ -1096,6 +1369,15 @@ impl Editor {
                     self.quit = !self.doc.is_modified();
                 }
             }
+            "e" | "edit" | "e!" | "edit!" => {
+                let force = name.ends_with('!');
+                match (arg, self.doc.path().map(Path::to_path_buf)) {
+                    ("", Some(current)) => self.open(&current, Some(self.line()), force),
+                    ("", None) => self.message = Some("No file name".into()),
+                    (file, _) => self.open(Path::new(file), None, force),
+                }
+            }
+            "Dashboard" => self.run_command(Command::Dashboard),
             "noh" | "nohlsearch" => self.highlight_search = false,
             "set" => match arg {
                 "nu" | "number" => self.number = true,
@@ -1129,6 +1411,8 @@ impl Editor {
         });
     }
 }
+
+const NOT_SAVED: &str = "No write since last change (:w saves, :e! FILE drops the changes)";
 
 /// Spaces and tabs at the start of `line`.
 fn leading_blank(line: &str) -> String {
@@ -1385,10 +1669,16 @@ fn parse_leader(keys: &[Key]) -> Parsed {
             _ => return Parsed::Invalid,
         }
     }
-    if let Some((_, name)) = LEADER.iter().find(|(k, _)| *k == typed) {
-        return Parsed::Done(None, Cmd::Leader(name));
+    if let Some(b) = COMMANDS
+        .iter()
+        .find(|b| !b.leader.is_empty() && b.leader == typed)
+    {
+        return Parsed::Done(None, Cmd::Leader(b.command));
     }
-    if LEADER.iter().any(|(k, _)| k.starts_with(typed.as_str())) {
+    if COMMANDS
+        .iter()
+        .any(|b| b.leader.starts_with(typed.as_str()))
+    {
         Parsed::Incomplete
     } else {
         Parsed::Invalid
@@ -1569,14 +1859,23 @@ mod tests {
         e.handle_key(Key::Char(' '));
         assert_eq!(
             e.leader_menu(),
-            Some(vec![('q', "+quit/session"), ('u', "+ui")])
+            Some(vec![
+                (' ', "Find Files"),
+                ('/', "Find Text (Grep)"),
+                ('f', "+file/find"),
+                ('q', "+quit/session"),
+                ('s', "+search"),
+                ('u', "+ui")
+            ])
         );
         e.handle_key(Key::Char('u'));
         assert_eq!(
             e.leader_menu(),
             Some(vec![
-                ('L', "Toggle relative numbers"),
-                ('l', "Toggle line numbers")
+                ('C', "Colorscheme with Preview"),
+                ('L', "Toggle Relative Numbers"),
+                ('l', "Toggle Line Numbers"),
+                ('r', "Clear Search Highlight")
             ])
         );
         e.handle_key(Key::Char('l'));
@@ -1587,5 +1886,102 @@ mod tests {
             e.handle_key(k);
         }
         assert!(e.quit);
+    }
+
+    #[test]
+    fn dashboard_menu_and_new_file() {
+        let mut e = ed("|");
+        e.dashboard = Some(0);
+        e.handle_key(Key::Char('j'));
+        assert_eq!(e.dashboard, Some(1));
+        // `?` opens the keymaps picker over the start screen; Esc goes back to it.
+        e.handle_key(Key::Char('?'));
+        assert_eq!(e.picker.as_ref().unwrap().kind, Kind::Keymaps);
+        e.handle_key(Key::Esc);
+        assert!(e.picker.is_none() && e.dashboard.is_some());
+        e.handle_key(Key::Char('n'));
+        assert_eq!((e.dashboard, e.mode), (None, Mode::Insert));
+    }
+
+    #[test]
+    fn keymaps_picker_runs_commands() {
+        let mut e = ed("|a");
+        for k in keys("<Space>sk") {
+            e.handle_key(k);
+        }
+        for k in keys("line num") {
+            e.handle_key(k);
+        }
+        let p = e.picker.as_ref().unwrap();
+        assert_eq!(p.current().unwrap().text, "Toggle Line Numbers");
+        e.handle_key(Key::Enter);
+        assert!(e.picker.is_none() && !e.number);
+        // Keys can be searched too: a cheat-sheet row is shown, not run.
+        for k in keys("<Space>skdd<CR>") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.message.as_deref(), Some("dd  Delete a line"));
+    }
+
+    #[test]
+    fn themes_preview_and_escape_restores() {
+        let mut e = ed("|a");
+        e.themes = vec!["night", "storm", "moon"];
+        e.run_command(Command::Themes);
+        e.handle_key(Key::Down);
+        assert_eq!(e.theme, 1);
+        e.handle_key(Key::Esc);
+        assert_eq!(e.theme, 0);
+        e.run_command(Command::Themes);
+        for k in keys("moon<CR>") {
+            e.handle_key(k);
+        }
+        assert_eq!((e.theme, e.state.theme.as_deref()), (2, Some("moon")));
+        assert!(e.requests.contains(&Request::SaveState));
+    }
+
+    #[test]
+    fn grep_results_for_an_old_query_are_dropped() {
+        let mut e = ed("|a");
+        e.run_command(Command::FindText);
+        for k in keys("fo") {
+            e.handle_key(k);
+        }
+        assert_eq!(
+            e.requests,
+            [Request::Grep("f".into()), Request::Grep("fo".into())]
+        );
+        let hit = |t: &str| Item {
+            text: t.into(),
+            detail: String::new(),
+            pick: Pick::Info,
+        };
+        e.receive(Kind::Grep, "f", vec![hit("old")]);
+        assert!(e.picker.as_ref().unwrap().items.is_empty());
+        e.receive(Kind::Grep, "fo", vec![hit("food")]);
+        let p = e.picker.as_ref().unwrap();
+        assert_eq!(
+            (p.items.len(), p.matches[0].positions.clone()),
+            (1, vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn open_refuses_to_drop_changes() {
+        let dir = std::env::temp_dir().join(format!("fener-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("b.txt");
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        let mut e = ed("|a");
+        e.handle_key(Key::Char('x'));
+        e.open(&file, Some(2), false);
+        assert!(e.message.as_deref().unwrap().starts_with("No write"));
+        e.open(&file, Some(2), true);
+        assert_eq!(
+            (e.line(), e.doc.rope.to_string().as_str()),
+            (2, "one\ntwo\nthree\n")
+        );
+        assert_eq!(e.state.recent[0], file);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
