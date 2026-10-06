@@ -72,6 +72,13 @@ pub struct State {
     fence: bool,
 }
 
+impl State {
+    /// Inside a Markdown code fence (for the formatted reader).
+    pub fn in_fence(self) -> bool {
+        self.fence
+    }
+}
+
 const KEYWORDS: &[&str] = &[
     // shared by many languages
     "if",

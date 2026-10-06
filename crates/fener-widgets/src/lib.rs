@@ -4,6 +4,8 @@
 //! into a buffer area with a theme it is given. The default colors are LazyVim's (tokyonight
 //! "night").
 
+mod markdown;
+
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -129,8 +131,13 @@ pub fn render(
             draw_tree(buf, left, editor);
             text_area = right;
         }
-        editor.scroll_to_cursor(usize::from(text_area.height));
-        cursor = draw_text(buf, text_area, editor, view);
+        if editor.reader {
+            editor.view_height = usize::from(text_area.height);
+            draw_reader(buf, text_area, editor);
+        } else {
+            editor.scroll_to_cursor(usize::from(text_area.height));
+            cursor = draw_text(buf, text_area, editor, view);
+        }
         if editor.tree_focus {
             cursor = None;
         }
@@ -275,6 +282,29 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
     cursor
 }
 
+/// The Markdown reader: formatted lines from `reader_top`, wrapped at words, in a column of
+/// at most 100 cells.
+fn draw_reader(buf: &mut Buffer, area: Rect, editor: &Editor) {
+    let rope = &editor.doc.rope;
+    let width = usize::from(area.width.saturating_sub(4)).clamp(10, 100);
+    let x = area.x + 2;
+    let mut in_code = syntax::state_after(Lang::Markdown, rope, editor.reader_top).in_fence();
+    let mut y = area.y;
+    for line in editor.reader_top..text::line_count(rope) {
+        if y >= area.bottom() {
+            break;
+        }
+        let spans = markdown::line(&text::line_text(rope, line), &mut in_code, width);
+        for row in markdown::wrap(spans, width) {
+            if y >= area.bottom() {
+                break;
+            }
+            row.render(Rect::new(x, y, width as u16, 1), buf);
+            y += 1;
+        }
+    }
+}
+
 /// The color of a kind of text (tokyonight's choices: keywords purple, functions blue,
 /// types cyan, strings green, numbers orange, comments dim and italic).
 fn kind_style(kind: TextKind) -> Style {
@@ -341,7 +371,11 @@ fn mode_label(mode: Mode) -> (&'static str, Color) {
 
 /// lualine-like: the mode in its color, the file, and on the right pending keys, position, %.
 fn draw_status(buf: &mut Buffer, area: Rect, editor: &Editor) {
-    let (mode, color) = mode_label(editor.mode);
+    let (mode, color) = if editor.reader {
+        ("READ", t().cyan)
+    } else {
+        mode_label(editor.mode)
+    };
     let name = editor
         .doc
         .path()

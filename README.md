@@ -9,6 +9,7 @@ project's folder tree beside it. `Alt+1` is always back to the files.
 **Status:** early development.
 
 ![A code tab: the folder tree on the left, the editor on the right](docs/img/code-tab.png)
+![Markdown files open formatted (the reader)](docs/img/reader.png)
 ![Find Files: a fuzzy picker](docs/img/find-files.png)
 ![Keymaps: every key, searchable; Enter runs it](docs/img/keymaps.png)
 ![The Space leader with its which-key box](docs/img/which-key.png)
@@ -30,7 +31,10 @@ runs the one you pick.
   - operators: `d c y > <` (`dd cc yy >> <<`), text objects `iw aw iW aW i" a" i' i( a( i[ i{ i<` ...
   - `x X s S D C Y p P J r ~ u Ctrl+R .`, Insert (`i a I A o O`), Visual (`v V`)
 - Search `/` `?` with smart case, `:w`, `:e FILE`, `Ctrl+S`
-- Colors follow the file manager's theme
+- Syntax colors (keywords, functions and macros, types, strings, numbers, comments) for C-like, `#`-comment and
+  `--`-comment languages and Markdown, in the file manager's theme
+- Markdown files open in a reader: headings, lists, task boxes, quotes, framed code, **bold**, *italic*, links,
+  wrapped at words. `j k Ctrl+D Ctrl+U g G` scroll, `i` or `Esc` edits the source there, `Space u m` back
 
 The file manager itself is liman's: grid / normal / detailed views, Places, preview, built-in terminal, git panel,
 tabs, themes. Its guide: [liman's KILAVUZ](https://github.com/WertC-14/liman/blob/main/docs/KILAVUZ.md).

@@ -15,6 +15,7 @@ pub enum Command {
     Save,
     Quit,
     ToggleNumbers,
+    ToggleReader,
     ToggleRelativeNumbers,
     ClearSearch,
 }
@@ -44,6 +45,7 @@ pub const COMMANDS: &[Binding] = &[
     bind(Command::FindText, "sg", "Grep"),
     bind(Command::Keymaps, "sk", "Keymaps"),
     bind(Command::Themes, "uC", "Colorscheme with Preview"),
+    bind(Command::ToggleReader, "um", "Toggle Markdown Reader"),
     bind(Command::ToggleNumbers, "ul", "Toggle Line Numbers"),
     bind(
         Command::ToggleRelativeNumbers,
@@ -114,6 +116,10 @@ pub const VIM_KEYS: &[(&str, &str)] = &[
     (":q", "Quit (:q! without saving)"),
     (":e FILE", "Open a file (:e! drops changes)"),
     ("Ctrl+H Ctrl+L", "To the folder tree / back to the text"),
+    (
+        "␣ u m",
+        "Markdown: formatted reader / source (i, Esc: edit)",
+    ),
 ];
 
 /// How a leader key sequence is written for people: `␣ f f`.

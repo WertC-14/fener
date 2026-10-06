@@ -13,6 +13,7 @@ use crate::command::{COMMANDS, Command, DASHBOARD, GROUPS, VIM_KEYS, leader_labe
 use crate::document::Document;
 use crate::picker::{Item, Kind, Pick, Picker};
 use crate::state::State;
+use crate::syntax::Lang;
 use crate::text;
 use crate::tree::{self, Tree};
 
@@ -240,6 +241,10 @@ pub struct Editor {
     /// The folder tree on the left (`Space e`), and whether keys go to it.
     pub tree: Option<Tree>,
     pub tree_focus: bool,
+    /// Markdown shown formatted (`Space u m`); Markdown files open this way. `reader_top`:
+    /// the first source line on screen.
+    pub reader: bool,
+    pub reader_top: usize,
 }
 
 impl Editor {
@@ -277,7 +282,17 @@ impl Editor {
             theme: 0,
             tree: None,
             tree_focus: false,
+            reader: false,
+            reader_top: 0,
         }
+        .reader_for_markdown()
+    }
+
+    /// Markdown files start in the reader.
+    fn reader_for_markdown(mut self) -> Self {
+        self.reader = self.doc.path().map(Lang::from_path) == Some(Lang::Markdown);
+        self.reader_top = 0;
+        self
     }
 
     pub fn line(&self) -> usize {
@@ -383,8 +398,12 @@ impl Editor {
                     self.tree_focus = false;
                     return;
                 }
-                // Space (leader) and `:` work from the tree too.
+                // Space (leader) and `:` work from the tree and the reader too.
                 Key::Char(' ' | ':') => {}
+                _ if self.reader && !self.tree_focus => {
+                    self.reader_key(key);
+                    return;
+                }
                 _ if self.tree_focus && self.tree.is_some() => {
                     self.tree_key(key);
                     return;
@@ -972,6 +991,14 @@ impl Editor {
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
             Command::Quit => self.ex("qa"),
+            Command::ToggleReader => {
+                self.reader = !self.reader;
+                if self.reader {
+                    self.reader_top = self.top;
+                } else {
+                    self.leave_reader();
+                }
+            }
             Command::ToggleNumbers => self.number = !self.number,
             Command::ToggleRelativeNumbers => self.relative_number = !self.relative_number,
             Command::ClearSearch => self.highlight_search = false,
@@ -1059,6 +1086,37 @@ impl Editor {
         }
     }
 
+    /// A key in the Markdown reader: scrolling, or `i` / `Esc` to edit the source.
+    fn reader_key(&mut self, key: Key) {
+        let last = text::line_count(&self.doc.rope).saturating_sub(1);
+        let half = (self.view_height / 2).max(1);
+        match key {
+            Key::Char('j') | Key::Down | Key::Ctrl('e') | Key::Enter => self.reader_top += 1,
+            Key::Char('k') | Key::Up | Key::Ctrl('y') => {
+                self.reader_top = self.reader_top.saturating_sub(1);
+            }
+            Key::Ctrl('d') => self.reader_top += half,
+            Key::Ctrl('u') => self.reader_top = self.reader_top.saturating_sub(half),
+            Key::Char('g') | Key::Home => self.reader_top = 0,
+            Key::Char('G') | Key::End => self.reader_top = last,
+            Key::Char('i' | 'e') | Key::Esc => {
+                self.reader = false;
+                self.leave_reader();
+            }
+            _ => self.message = Some("Reader: j k scroll, i or Esc to edit, Space u m".into()),
+        }
+        self.reader_top = self.reader_top.min(last);
+    }
+
+    /// Back to the source at the place the reader was showing.
+    fn leave_reader(&mut self) {
+        let line = self
+            .reader_top
+            .min(text::line_count(&self.doc.rope).saturating_sub(1));
+        self.top = line;
+        self.cursor = text::first_non_blank(&self.doc.rope, line);
+    }
+
     /// Adds `path` to the recent files.
     pub fn remember(&mut self, path: &Path) {
         self.state.remember(path);
@@ -1092,6 +1150,8 @@ impl Editor {
 
     /// Replaces the document; the cursor and the view start over.
     fn load(&mut self, doc: Document) {
+        self.reader = doc.path().map(Lang::from_path) == Some(Lang::Markdown);
+        self.reader_top = 0;
         self.doc = doc;
         self.cursor = 0;
         self.anchor = 0;
@@ -1963,6 +2023,7 @@ mod tests {
                 ('C', "Colorscheme with Preview"),
                 ('L', "Toggle Relative Numbers"),
                 ('l', "Toggle Line Numbers"),
+                ('m', "Toggle Markdown Reader"),
                 ('r', "Clear Search Highlight")
             ])
         );
@@ -2001,6 +2062,31 @@ mod tests {
         e.handle_key(Key::Ctrl('h'));
         e.handle_key(Key::Char('q'));
         assert!(e.tree.is_none() && !e.tree_focus);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn markdown_opens_in_the_reader_and_i_edits_where_it_was() {
+        let dir = std::env::temp_dir().join(format!("fener-reader-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "# A\n\none\ntwo\nthree\n").unwrap();
+        let mut e = Editor::new(Document::open(&file).unwrap());
+        assert!(e.reader);
+        for k in keys("jjj") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.reader_top, 3);
+        // x does nothing in the reader (no edit by accident).
+        e.handle_key(Key::Char('x'));
+        assert!(!e.doc.is_modified());
+        e.handle_key(Key::Char('i'));
+        assert!(!e.reader);
+        assert_eq!((e.line(), e.mode), (3, Mode::Normal));
+        for k in keys("<Space>um") {
+            e.handle_key(k);
+        }
+        assert!(e.reader);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
