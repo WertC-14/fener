@@ -2,16 +2,20 @@
 //!
 //! The terminal setup and the event loop follow liman's (fm-research ADR 0010): an input thread
 //! sends events over a channel, the main loop draws only when something changed, inside a
-//! synchronized update so the terminal never shows half a frame.
+//! synchronized update so the terminal never shows half a frame. Slow work (listing and
+//! searching files for the pickers) runs on worker threads and comes back on the same channel.
 
 mod ui;
 
 use std::io::{self, stdout};
-use std::path::PathBuf;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
-use fener_core::{Document, Editor, Key, Mode};
+use fener_core::picker::{self, Item, Kind};
+use fener_core::{Document, Editor, Key, Mode, Request, State, files};
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
@@ -19,8 +23,22 @@ use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdat
 
 const HELP: &str = "fener: a modal terminal editor in the spirit of LazyVim
 
-Usage: fener [FILE]      edit FILE (a new file is created on :w)
-       fener --version";
+Usage: fener             the start screen (find, recent and new files, themes, keys)
+       fener FILE        edit FILE (a new file is created on :w)
+       fener --version
+
+Space opens the command menu; Space s k (or ? on the start screen) lists every key.
+FENER_ICONS=plain turns off the Nerd Font icons.";
+
+/// Most files listed for Find Files, and most lines Find Text shows.
+const MAX_FILES: usize = 100_000;
+const MAX_HITS: usize = 2_000;
+
+enum Msg {
+    Term(Event),
+    /// A picker's list from a worker: the picker kind, the query it is for, the items.
+    Items(Kind, String, Vec<Item>),
+}
 
 fn main() -> io::Result<()> {
     let arg = std::env::args().nth(1);
@@ -40,17 +58,30 @@ fn main() -> io::Result<()> {
         None => Document::new(""),
     };
     let mut editor = Editor::new(doc);
+    editor.root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    editor.state = State::load();
+    editor.themes = ui::THEMES.iter().map(|t| t.name).collect();
+    if let Some(name) = &editor.state.theme {
+        editor.theme = ui::THEMES.iter().position(|t| t.name == name).unwrap_or(0);
+    }
+    match &arg {
+        Some(path) => editor.remember(Path::new(path)),
+        None => editor.dashboard = Some(0),
+    }
     let mut view = ui::View::default();
 
     let mut terminal = ratatui::try_init()?;
     let (tx, rx) = mpsc::channel();
+    let input = tx.clone();
     thread::spawn(move || {
         while let Ok(ev) = event::read() {
-            if tx.send(ev).is_err() {
+            if input.send(Msg::Term(ev)).is_err() {
                 break;
             }
         }
     });
+    // Bumped by each new worker job; a job that sees it change stops (its result is stale).
+    let generation = Arc::new(AtomicU64::new(0));
 
     let mut dirty = true;
     let mut shape = None;
@@ -82,22 +113,29 @@ fn main() -> io::Result<()> {
             break Ok(());
         };
         // Drain what queued up meanwhile: a paste or key repeat costs one frame.
-        for ev in std::iter::once(first).chain(rx.try_iter()) {
-            match ev {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+        for msg in std::iter::once(first).chain(rx.try_iter()) {
+            match msg {
+                Msg::Term(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     if let Some(key) = convert(key) {
                         editor.handle_key(key);
                         dirty = true;
                     }
                 }
-                Event::Paste(text) => {
+                Msg::Term(Event::Paste(text)) => {
                     for c in text.chars() {
                         editor.handle_key(if c == '\n' { Key::Enter } else { Key::Char(c) });
                     }
                     dirty = true;
                 }
-                Event::Resize(..) => dirty = true,
-                _ => {}
+                Msg::Term(Event::Resize(..)) => dirty = true,
+                Msg::Term(_) => {}
+                Msg::Items(kind, query, items) => {
+                    editor.receive(kind, &query, items);
+                    dirty = true;
+                }
+            }
+            for request in std::mem::take(&mut editor.requests) {
+                start(request, &editor, &tx, &generation);
             }
         }
         if editor.quit {
@@ -107,6 +145,39 @@ fn main() -> io::Result<()> {
     let _ = execute!(stdout(), SetCursorStyle::DefaultUserShape);
     ratatui::restore();
     result
+}
+
+/// Does what the editor asked for: state is written here, lists are made on a worker.
+fn start(request: Request, editor: &Editor, tx: &Sender<Msg>, generation: &Arc<AtomicU64>) {
+    if request == Request::SaveState {
+        // Remembering is a convenience: a read-only home folder must not stop editing.
+        let _ = editor.state.save();
+        return;
+    }
+    let root = editor.root.clone();
+    let tx = tx.clone();
+    let mine = generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let generation = Arc::clone(generation);
+    let cancel = move || generation.load(Ordering::Relaxed) != mine;
+    match request {
+        Request::SaveState => {}
+        Request::ListFiles => {
+            thread::spawn(move || {
+                let paths = files::list(&root, MAX_FILES, &cancel);
+                let items = picker::file_items(&root, paths);
+                let _ = tx.send(Msg::Items(Kind::Files, String::new(), items));
+            });
+        }
+        Request::Grep(query) => {
+            thread::spawn(move || {
+                let hits = files::grep(&root, &query, MAX_HITS, &cancel);
+                if !cancel() {
+                    let items = picker::grep_items(&root, hits);
+                    let _ = tx.send(Msg::Items(Kind::Grep, query, items));
+                }
+            });
+        }
+    }
 }
 
 /// A terminal key event as fener's key (`None` for keys fener does not use).

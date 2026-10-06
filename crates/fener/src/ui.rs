@@ -1,8 +1,13 @@
 //! Draws the editor: the text with line numbers, the status line, the command line and the
-//! which-key box. Colors are LazyVim's default theme (tokyonight "night").
+//! which-key box, the start screen and the pickers. The default colors are LazyVim's
+//! (tokyonight "night").
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use fener_core::command::DASHBOARD;
+use fener_core::picker::{Kind, Picker};
 use fener_core::text;
-use fener_core::{Editor, Mode};
+use fener_core::{Command, Editor, Mode};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,21 +15,64 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget};
 
-const BG: Color = Color::Rgb(0x1a, 0x1b, 0x26);
-const BG_DARK: Color = Color::Rgb(0x16, 0x16, 0x1e);
-const BG_LINE: Color = Color::Rgb(0x29, 0x2e, 0x42);
-const BG_VISUAL: Color = Color::Rgb(0x28, 0x34, 0x57);
-const BG_SEARCH: Color = Color::Rgb(0x3d, 0x59, 0xa1);
-const FG: Color = Color::Rgb(0xc0, 0xca, 0xf5);
-const FG_DIM: Color = Color::Rgb(0x56, 0x5f, 0x89);
-const GUTTER: Color = Color::Rgb(0x3b, 0x42, 0x61);
-const CURRENT_NR: Color = Color::Rgb(0xff, 0x9e, 0x64);
-const BLUE: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
-const GREEN: Color = Color::Rgb(0x9e, 0xce, 0x6a);
-const MAGENTA: Color = Color::Rgb(0xbb, 0x9a, 0xf7);
-const YELLOW: Color = Color::Rgb(0xe0, 0xaf, 0x68);
-const RED: Color = Color::Rgb(0xf7, 0x76, 0x8e);
-const CYAN: Color = Color::Rgb(0x7d, 0xcf, 0xff);
+/// A color scheme. The first is LazyVim's default; `Space u C` switches with a live preview.
+pub struct Theme {
+    pub name: &'static str,
+    bg: Color,
+    bg_dark: Color,
+    bg_line: Color,
+    bg_visual: Color,
+    bg_search: Color,
+    fg: Color,
+    fg_dim: Color,
+    gutter: Color,
+    orange: Color,
+    blue: Color,
+    green: Color,
+    magenta: Color,
+    yellow: Color,
+    red: Color,
+    cyan: Color,
+}
+
+const fn hex(v: u32) -> Color {
+    Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+#[rustfmt::skip]
+const fn theme(name: &'static str, c: [u32; 15]) -> Theme {
+    Theme {
+        name, bg: hex(c[0]), bg_dark: hex(c[1]), bg_line: hex(c[2]), bg_visual: hex(c[3]),
+        bg_search: hex(c[4]), fg: hex(c[5]), fg_dim: hex(c[6]), gutter: hex(c[7]),
+        orange: hex(c[8]), blue: hex(c[9]), green: hex(c[10]), magenta: hex(c[11]),
+        yellow: hex(c[12]), red: hex(c[13]), cyan: hex(c[14]),
+    }
+}
+
+// bg, bg_dark, bg_line, bg_visual, bg_search, fg, fg_dim, gutter,
+// orange, blue, green, magenta, yellow, red, cyan
+#[rustfmt::skip]
+pub const THEMES: [Theme; 6] = [
+    theme("tokyonight-night", [0x1a1b26, 0x16161e, 0x292e42, 0x283457, 0x3d59a1, 0xc0caf5, 0x565f89, 0x3b4261,
+        0xff9e64, 0x7aa2f7, 0x9ece6a, 0xbb9af7, 0xe0af68, 0xf7768e, 0x7dcfff]),
+    theme("tokyonight-storm", [0x24283b, 0x1f2335, 0x292e42, 0x2e3c64, 0x3d59a1, 0xc0caf5, 0x565f89, 0x3b4261,
+        0xff9e64, 0x7aa2f7, 0x9ece6a, 0xbb9af7, 0xe0af68, 0xf7768e, 0x7dcfff]),
+    theme("tokyonight-moon", [0x222436, 0x1e2030, 0x2f334d, 0x2d3f76, 0x3e68d7, 0xc8d3f5, 0x636da6, 0x3b4261,
+        0xff966c, 0x82aaff, 0xc3e88d, 0xc099ff, 0xffc777, 0xff757f, 0x86e1fc]),
+    theme("tokyonight-day", [0xe1e2e7, 0xd0d5e3, 0xc4c8da, 0xb7c1e3, 0x7890dd, 0x3760bf, 0x848cb5, 0xa8aecb,
+        0xb15c00, 0x2e7de9, 0x587539, 0x9854f1, 0x8c6c3e, 0xf52a65, 0x007197]),
+    theme("catppuccin-mocha", [0x1e1e2e, 0x181825, 0x313244, 0x45475a, 0x585b70, 0xcdd6f4, 0x6c7086, 0x45475a,
+        0xfab387, 0x89b4fa, 0xa6e3a1, 0xcba6f7, 0xf9e2af, 0xf38ba8, 0x89dceb]),
+    theme("gruvbox", [0x282828, 0x1d2021, 0x3c3836, 0x504945, 0x665c54, 0xebdbb2, 0x928374, 0x665c54,
+        0xfe8019, 0x83a598, 0xb8bb26, 0xd3869b, 0xfabd2f, 0xfb4934, 0x8ec07c]),
+];
+
+static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+/// The theme in use (the editor's choice, set at the start of each frame).
+fn t() -> &'static Theme {
+    &THEMES[CURRENT.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+}
 
 /// Cells a tab takes (LazyVim: `tabstop = 2`).
 const TAB_WIDTH: usize = 2;
@@ -38,19 +86,29 @@ pub struct View {
 
 /// Draws a frame; returns where the terminal cursor goes.
 pub fn render(frame: &mut Frame, editor: &mut Editor, view: &mut View) -> Option<(u16, u16)> {
+    CURRENT.store(editor.theme, Ordering::Relaxed);
     let [body, status, command] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    frame.render_widget(Block::new().style(Style::new().bg(BG)), frame.area());
-    editor.scroll_to_cursor(usize::from(body.height));
-    let cursor = draw_text(frame.buffer_mut(), body, editor, view);
-    draw_status(frame, status, editor);
+    frame.render_widget(Block::new().style(Style::new().bg(t().bg)), frame.area());
+    let mut cursor = None;
+    if let Some(selected) = editor.dashboard {
+        draw_dashboard(frame.buffer_mut(), body.union(status), selected);
+    } else {
+        editor.scroll_to_cursor(usize::from(body.height));
+        cursor = draw_text(frame.buffer_mut(), body, editor, view);
+        draw_status(frame, status, editor);
+    }
     let command_cursor = draw_command_line(frame, command, editor);
     if let Some(menu) = editor.leader_menu() {
         draw_which_key(frame, body, &menu, &editor.pending_keys());
+    }
+    if let Some(picker) = &editor.picker {
+        let area = frame.area();
+        return draw_picker(frame.buffer_mut(), area, picker);
     }
     command_cursor.or(cursor)
 }
@@ -103,30 +161,30 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
                 area.x + gutter as u16,
                 y,
                 "~",
-                Style::new().fg(GUTTER).bg(BG),
+                Style::new().fg(t().gutter).bg(t().bg),
             );
             continue;
         }
         let is_cursor_line = line == cursor_line;
         if is_cursor_line {
-            buf.set_style(row_area, Style::new().bg(BG_LINE));
+            buf.set_style(row_area, Style::new().bg(t().bg_line));
         }
         if gutter > 0 {
             let (label, style) = if is_cursor_line {
                 let n = (line + 1).to_string();
                 (
                     format!("{n:<w$} ", w = gutter - 1),
-                    Style::new().fg(CURRENT_NR).add_modifier(Modifier::BOLD),
+                    Style::new().fg(t().orange).add_modifier(Modifier::BOLD),
                 )
             } else if editor.relative_number {
                 (
                     format!("{:>w$} ", line.abs_diff(cursor_line), w = gutter - 1),
-                    Style::new().fg(GUTTER),
+                    Style::new().fg(t().gutter),
                 )
             } else {
                 (
                     format!("{:>w$} ", line + 1, w = gutter - 1),
-                    Style::new().fg(GUTTER),
+                    Style::new().fg(t().gutter),
                 )
             };
             buf.set_string(area.x, y, label, style);
@@ -142,12 +200,12 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
             let visible = col >= view.left && col + w <= view.left + width;
             if visible {
                 let x = x0 + (col - view.left) as u16;
-                let mut style = Style::new().fg(FG);
+                let mut style = Style::new().fg(t().fg);
                 if matches.iter().any(|&(a, b)| pos >= a && pos < b) {
-                    style = style.bg(BG_SEARCH);
+                    style = style.bg(t().bg_search);
                 }
                 if selection.is_some_and(|(a, b)| pos >= a && pos < b) {
-                    style = style.bg(BG_VISUAL);
+                    style = style.bg(t().bg_visual);
                 }
                 let symbol = if c == '\t' {
                     " ".repeat(w)
@@ -163,7 +221,7 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         }
         // An empty line in a Visual Line selection still shows one selected cell.
         if len == 0 && selection.is_some_and(|(a, b)| start >= a && start <= b) && view.left == 0 {
-            buf.set_style(Rect::new(x0, y, 1, 1), Style::new().bg(BG_VISUAL));
+            buf.set_style(Rect::new(x0, y, 1, 1), Style::new().bg(t().bg_visual));
         }
         if is_cursor_line && editor.cursor == start + len {
             // On the end of the line (Insert mode, or an empty line).
@@ -215,11 +273,11 @@ fn search_matches(editor: &Editor, height: u16) -> Vec<(usize, usize)> {
 
 fn mode_label(mode: Mode) -> (&'static str, Color) {
     match mode {
-        Mode::Normal => ("NORMAL", BLUE),
-        Mode::Insert => ("INSERT", GREEN),
-        Mode::Visual => ("VISUAL", MAGENTA),
-        Mode::VisualLine => ("V-LINE", MAGENTA),
-        Mode::Command | Mode::Search => ("COMMAND", YELLOW),
+        Mode::Normal => ("NORMAL", t().blue),
+        Mode::Insert => ("INSERT", t().green),
+        Mode::Visual => ("VISUAL", t().magenta),
+        Mode::VisualLine => ("V-LINE", t().magenta),
+        Mode::Command | Mode::Search => ("COMMAND", t().yellow),
     }
 }
 
@@ -235,12 +293,12 @@ fn draw_status(frame: &mut Frame, area: Rect, editor: &Editor) {
         Span::styled(
             format!(" {mode} "),
             Style::new()
-                .fg(BG_DARK)
+                .fg(t().bg_dark)
                 .bg(color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {name}"), Style::new().fg(FG)),
-        Span::styled(modified, Style::new().fg(YELLOW)),
+        Span::styled(format!(" {name}"), Style::new().fg(t().fg)),
+        Span::styled(modified, Style::new().fg(t().yellow)),
     ]);
     let lines = text::line_count(&editor.doc.rope);
     let percent = match editor.line() {
@@ -251,19 +309,22 @@ fn draw_status(frame: &mut Frame, area: Rect, editor: &Editor) {
     let right = Line::from(vec![
         Span::styled(
             format!("{}  ", editor.pending_keys()),
-            Style::new().fg(FG_DIM),
+            Style::new().fg(t().fg_dim),
         ),
-        Span::styled(format!(" {percent} "), Style::new().fg(color).bg(BG_LINE)),
+        Span::styled(
+            format!(" {percent} "),
+            Style::new().fg(color).bg(t().bg_line),
+        ),
         Span::styled(
             format!(" {}:{} ", editor.line() + 1, editor.col() + 1),
             Style::new()
-                .fg(BG_DARK)
+                .fg(t().bg_dark)
                 .bg(color)
                 .add_modifier(Modifier::BOLD),
         ),
     ])
     .right_aligned();
-    frame.render_widget(Block::new().style(Style::new().bg(BG_DARK)), area);
+    frame.render_widget(Block::new().style(Style::new().bg(t().bg_dark)), area);
     frame.render_widget(Paragraph::new(left), area);
     frame.render_widget(Paragraph::new(right), area);
 }
@@ -280,12 +341,12 @@ fn draw_command_line(frame: &mut Frame, area: Rect, editor: &Editor) -> Option<(
                     || message.starts_with("Cannot")
                     || message.starts_with("Pattern")
                 {
-                    RED
+                    t().red
                 } else {
-                    FG
+                    t().fg
                 };
                 frame.render_widget(
-                    Paragraph::new(message.as_str()).style(Style::new().fg(color).bg(BG)),
+                    Paragraph::new(message.as_str()).style(Style::new().fg(color).bg(t().bg)),
                     area,
                 );
             }
@@ -294,7 +355,10 @@ fn draw_command_line(frame: &mut Frame, area: Rect, editor: &Editor) -> Option<(
     };
     let text = format!("{prefix}{}", editor.cmdline);
     let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
-    frame.render_widget(Paragraph::new(text).style(Style::new().fg(FG).bg(BG)), area);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::new().fg(t().fg).bg(t().bg)),
+        area,
+    );
     Some((area.x + width.min(area.width.saturating_sub(1)), area.y))
 }
 
@@ -316,12 +380,12 @@ fn draw_which_key(frame: &mut Frame, area: Rect, menu: &[(char, &str)], typed: &
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(BLUE))
+        .border_style(Style::new().fg(t().blue))
         .title(Span::styled(
             format!(" {} ", typed.trim()),
-            Style::new().fg(CYAN),
+            Style::new().fg(t().cyan),
         ))
-        .style(Style::new().bg(BG_DARK));
+        .style(Style::new().bg(t().bg_dark));
     let inner = block.inner(rect);
     block.render(rect, frame.buffer_mut());
     let lines: Vec<Line> = menu
@@ -330,13 +394,266 @@ fn draw_which_key(frame: &mut Frame, area: Rect, menu: &[(char, &str)], typed: &
             let group = label.starts_with('+');
             Line::from(vec![
                 Span::styled(
-                    format!(" {key} "),
-                    Style::new().fg(CYAN).add_modifier(Modifier::BOLD),
+                    format!(" {} ", if *key == ' ' { '␣' } else { *key }),
+                    Style::new().fg(t().cyan).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("➜ ", Style::new().fg(FG_DIM)),
-                Span::styled(*label, Style::new().fg(if group { MAGENTA } else { FG })),
+                Span::styled("➜ ", Style::new().fg(t().fg_dim)),
+                Span::styled(
+                    *label,
+                    Style::new().fg(if group { t().magenta } else { t().fg }),
+                ),
             ])
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Nerd Font icons, unless `FENER_ICONS=plain` (LazyVim assumes a Nerd Font too).
+fn nerd() -> bool {
+    static NERD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NERD.get_or_init(|| std::env::var("FENER_ICONS").map_or(true, |v| v != "plain"))
+}
+
+fn command_icon(command: Command) -> &'static str {
+    if !nerd() {
+        return "";
+    }
+    match command {
+        Command::FindFiles => "\u{f002} ",
+        Command::NewFile => "\u{f15b} ",
+        Command::FindText => "\u{f0f6} ",
+        Command::RecentFiles => "\u{f1da} ",
+        Command::Themes => "\u{f1fc} ",
+        Command::Keymaps => "\u{f11c} ",
+        Command::Quit => "\u{f08b} ",
+        _ => "\u{f101} ",
+    }
+}
+
+/// A file's icon and its color, by extension.
+fn file_icon(path: &str) -> (&'static str, Color) {
+    if !nerd() {
+        return ("", t().fg_dim);
+    }
+    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
+    match ext {
+        "rs" => ("\u{e7a8} ", t().orange),
+        "md" => ("\u{e73e} ", t().blue),
+        "toml" | "yaml" | "yml" | "ini" | "conf" => ("\u{e615} ", t().fg_dim),
+        "json" => ("\u{e60b} ", t().yellow),
+        "py" => ("\u{e606} ", t().yellow),
+        "js" | "ts" => ("\u{e74e} ", t().yellow),
+        "sh" | "fish" | "bash" | "zsh" => ("\u{f489} ", t().green),
+        "lock" => ("\u{f023} ", t().fg_dim),
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => ("\u{f1c5} ", t().magenta),
+        _ => ("\u{f15b} ", t().fg_dim),
+    }
+}
+
+const LOGO: [&str; 6] = [
+    "███████╗███████╗███╗   ██╗███████╗██████╗ ",
+    "██╔════╝██╔════╝████╗  ██║██╔════╝██╔══██╗",
+    "█████╗  █████╗  ██╔██╗ ██║█████╗  ██████╔╝",
+    "██╔══╝  ██╔══╝  ██║╚██╗██║██╔══╝  ██╔══██╗",
+    "██║     ███████╗██║ ╚████║███████╗██║  ██║",
+    "╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝",
+];
+
+/// The start screen: the logo, a menu with one-letter keys, and a hint (LazyVim's dashboard).
+fn draw_dashboard(buf: &mut Buffer, area: Rect, selected: usize) {
+    let gap = u16::from(area.height >= 26);
+    let menu_height = DASHBOARD.len() as u16 * (1 + gap);
+    let logo = area.height >= menu_height + 12;
+    let height = menu_height + 2 + if logo { LOGO.len() as u16 + 2 } else { 0 };
+    let mut y = area.y + area.height.saturating_sub(height) / 2;
+    let center = |w: u16| area.x + area.width.saturating_sub(w) / 2;
+    if logo {
+        for line in LOGO {
+            let w = unicode_width::UnicodeWidthStr::width(line) as u16;
+            buf.set_string(center(w), y, line, Style::new().fg(t().blue));
+            y += 1;
+        }
+        y += 2;
+    }
+    let width = 46.min(area.width);
+    let x = center(width);
+    for (i, (key, label, command)) in DASHBOARD.iter().enumerate() {
+        let row = Rect::new(x, y, width, 1);
+        let chosen = i == selected;
+        if chosen {
+            buf.set_style(row, Style::new().bg(t().bg_line));
+        }
+        let label_style = if chosen {
+            Style::new().fg(t().blue).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(t().fg)
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" {}", command_icon(*command)),
+                Style::new().fg(t().cyan),
+            ),
+            Span::styled(format!(" {label}"), label_style),
+        ]);
+        line.render(row, buf);
+        buf.set_string(
+            x + width - 3,
+            y,
+            key.to_string(),
+            Style::new().fg(t().orange).add_modifier(Modifier::BOLD),
+        );
+        y += 1 + gap;
+    }
+    y += 1;
+    let hint = Line::from(vec![
+        Span::styled("Press ", Style::new().fg(t().fg_dim)),
+        Span::styled("Space", Style::new().fg(t().cyan)),
+        Span::styled(" for the command menu, ", Style::new().fg(t().fg_dim)),
+        Span::styled("?", Style::new().fg(t().orange)),
+        Span::styled(" for all keys", Style::new().fg(t().fg_dim)),
+    ]);
+    let w = hint.width() as u16;
+    hint.render(Rect::new(center(w), y, w.min(area.width), 1), buf);
+}
+
+/// A picker as a floating box: the query on top, the matching items below, the selected one
+/// marked. Returns the cursor (at the end of the query).
+fn draw_picker(buf: &mut Buffer, area: Rect, picker: &Picker) -> Option<(u16, u16)> {
+    let width = area.width.saturating_sub(4).min(100);
+    // Short fixed lists get a box their size, so what is behind (a theme being tried) shows.
+    let fit = match picker.kind {
+        Kind::Themes | Kind::Recent => picker.items.len().max(1) as u16 + 4,
+        _ => 26,
+    };
+    let height = area.height.saturating_sub(4).min(26).min(fit);
+    if width < 20 || height < 5 {
+        return None;
+    }
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    Clear.render(rect, buf);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(t().blue))
+        .title(Span::styled(
+            format!(" {} ", picker.title),
+            Style::new().fg(t().orange),
+        ))
+        .style(Style::new().bg(t().bg_dark));
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    // The query line, with "12/340" on the right.
+    let y = inner.y;
+    let arrow = if nerd() { "\u{f054} " } else { "> " };
+    buf.set_string(inner.x + 1, y, arrow, Style::new().fg(t().cyan));
+    let prompt = 3;
+    buf.set_string(inner.x + prompt, y, &picker.query, Style::new().fg(t().fg));
+    let count = if picker.loading {
+        "…".to_string()
+    } else {
+        format!("{}/{}", picker.matches.len(), picker.items.len())
+    };
+    let count_w = count.chars().count() as u16;
+    buf.set_string(
+        inner.right().saturating_sub(count_w + 1),
+        y,
+        &count,
+        Style::new().fg(t().fg_dim),
+    );
+    let query_w = unicode_width::UnicodeWidthStr::width(picker.query.as_str()) as u16;
+    let cursor = (
+        (inner.x + prompt + query_w).min(inner.right().saturating_sub(1)),
+        y,
+    );
+    buf.set_string(
+        inner.x,
+        y + 1,
+        "─".repeat(usize::from(inner.width)),
+        Style::new().fg(t().gutter),
+    );
+
+    // The items, scrolled so the selected one is on screen.
+    let rows = usize::from(inner.height.saturating_sub(2));
+    let first = picker.selected.saturating_sub(rows.saturating_sub(1));
+    for (row, (i, m)) in picker
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .enumerate()
+    {
+        let item = &picker.items[m.index];
+        let y = inner.y + 2 + row as u16;
+        let chosen = i == picker.selected;
+        let row_rect = Rect::new(inner.x, y, inner.width, 1);
+        if chosen {
+            buf.set_style(row_rect, Style::new().bg(t().bg_line));
+            buf.set_string(inner.x, y, "▍", Style::new().fg(t().blue));
+        }
+        let mut spans = Vec::new();
+        match picker.kind {
+            Kind::Files | Kind::Recent | Kind::Grep => {
+                let path = if picker.kind == Kind::Grep {
+                    &item.detail
+                } else {
+                    &item.text
+                };
+                let (icon, color) = file_icon(path.split(':').next().unwrap_or(path));
+                spans.push(Span::styled(icon, Style::new().fg(color)));
+                if picker.kind == Kind::Grep {
+                    spans.push(Span::styled(
+                        format!("{} ", item.detail),
+                        Style::new().fg(t().fg_dim),
+                    ));
+                }
+            }
+            Kind::Themes => {
+                let mark = if nerd() { "\u{f1fc} " } else { "" };
+                spans.push(Span::styled(mark, Style::new().fg(t().magenta)));
+            }
+            Kind::Keymaps => {}
+        }
+        // The text, with the matched characters lit.
+        let base = Style::new().fg(t().fg);
+        let lit = Style::new().fg(t().orange).add_modifier(Modifier::BOLD);
+        for (ci, c) in item.text.chars().enumerate() {
+            let style = if m.positions.binary_search(&ci).is_ok() {
+                lit
+            } else {
+                base
+            };
+            spans.push(Span::styled(c.to_string(), style));
+        }
+        Line::from(spans).render(
+            Rect::new(inner.x + 2, y, inner.width.saturating_sub(3), 1),
+            buf,
+        );
+        if picker.kind == Kind::Keymaps && !item.detail.is_empty() {
+            let w = unicode_width::UnicodeWidthStr::width(item.detail.as_str()) as u16;
+            let x = inner.right().saturating_sub(w + 1);
+            buf.set_string(x.saturating_sub(1), y, " ", Style::new());
+            buf.set_string(x, y, &item.detail, Style::new().fg(t().cyan));
+            if chosen {
+                buf.set_style(
+                    Rect::new(x.saturating_sub(1), y, w + 1, 1),
+                    Style::new().bg(t().bg_line),
+                );
+            }
+        }
+    }
+    if picker.matches.is_empty() && !picker.loading {
+        let note = match picker.kind {
+            Kind::Grep if picker.query.is_empty() => "Type to search the text of the files",
+            Kind::Recent if picker.items.is_empty() => "No recent files yet",
+            _ => "No matches",
+        };
+        buf.set_string(inner.x + 2, inner.y + 2, note, Style::new().fg(t().fg_dim));
+    }
+    Some(cursor)
 }
