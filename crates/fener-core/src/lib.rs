@@ -9,6 +9,7 @@ pub mod editor;
 pub mod files;
 pub mod fuzzy;
 pub mod picker;
+pub mod run;
 pub mod state;
 pub mod syntax;
 pub mod text;

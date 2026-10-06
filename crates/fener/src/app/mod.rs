@@ -380,6 +380,31 @@ impl App {
             } => self.on_listing(generation, path, result),
             AppEvent::JobProgress { done, total } => self.on_job_progress(done, total),
             AppEvent::JobFinished(outcome) => self.on_job_finished(outcome),
+            // The shells under code tabs.
+            AppEvent::TermOutput { id, bytes } if self.code_tab_with_terminal(id).is_some() => {
+                if let Some(tab) = self.code_tab_with_terminal(id)
+                    && let Some(term) = &mut tab.terminal
+                {
+                    term.process(&bytes);
+                }
+                self.dirty = true;
+            }
+            AppEvent::TermQuiet(id) if self.code_tab_with_terminal(id).is_some() => {
+                if let Some(tab) = self.code_tab_with_terminal(id)
+                    && let Some(term) = &mut tab.terminal
+                {
+                    term.on_quiet();
+                }
+                self.dirty = true;
+            }
+            AppEvent::TermExited(id) if self.code_tab_with_terminal(id).is_some() => {
+                if let Some(tab) = self.code_tab_with_terminal(id) {
+                    tab.terminal = None;
+                    tab.term_open = false;
+                    tab.term_focus = false;
+                }
+                self.dirty = true;
+            }
             AppEvent::TermOutput { id, bytes } if self.is_active_terminal(id) => {
                 self.on_term_output(&bytes)
             }

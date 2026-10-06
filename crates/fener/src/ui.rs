@@ -820,9 +820,21 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(term) = &mut app.tab.terminal else {
         return;
     };
+    if let Some(cursor) = draw_term_screen(frame.buffer_mut(), inner, term, focused) {
+        frame.set_cursor_position(cursor);
+    }
+}
+
+/// A shell's screen into `inner` (resizing the shell to fit); the cursor when `focused`.
+/// Shared by the folder tabs' terminal and the code tabs' one.
+pub(crate) fn draw_term_screen(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: Rect,
+    term: &mut crate::terminal::Terminal,
+    focused: bool,
+) -> Option<(u16, u16)> {
     term.resize(inner.height, inner.width);
     let screen = term.screen();
-    let buf = frame.buffer_mut();
     for row in 0..inner.height {
         for col in 0..inner.width {
             let Some(cell) = screen.cell(row, col) else {
@@ -856,10 +868,10 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
                 .set_style(style);
         }
     }
-    if focused && !screen.hide_cursor() {
+    (focused && !screen.hide_cursor()).then(|| {
         let (row, col) = screen.cursor_position();
-        frame.set_cursor_position((inner.x + col, inner.y + row));
-    }
+        (inner.x + col, inner.y + row)
+    })
 }
 
 fn term_color(color: vt100::Color, default: Color) -> Color {

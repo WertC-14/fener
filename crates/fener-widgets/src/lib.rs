@@ -727,6 +727,11 @@ fn draw_picker(buf: &mut Buffer, area: Rect, picker: &Picker) -> Option<(u16, u1
                 spans.push(Span::styled(mark, Style::new().fg(t().magenta)));
             }
             Kind::Keymaps => {}
+            // The line number, dim, before the line.
+            Kind::Lines => spans.push(Span::styled(
+                format!("{:>5}  ", item.detail),
+                Style::new().fg(t().fg_dim),
+            )),
         }
         // The text, with the matched characters lit.
         let base = Style::new().fg(t().fg);

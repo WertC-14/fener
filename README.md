@@ -22,7 +22,13 @@ runs the one you pick.
 - Tabs: `Alt+1` the files, `Alt+2…9` the others, or click a tab; `:q` closes a code tab. Unsaved changes show a `●`
   on the tab and are never dropped silently: `:q`, a middle click and quitting fener show that tab with a warning
   (`:q!` drops them).
-- Folder tree on the left (`Space e`): the git repository around the file (else its folder), the file revealed;
+- `F5` saves, builds and runs the file in a terminal under the text: `cargo run` in a Cargo package (`--bin`,
+  `--example` as fits), else the file's own tool (`rustc lab-1.rs && ./lab-1`, `python3`, `cc`, `go run`, `node`,
+  `bash`, ...)
+- Terminal under the text: `Ctrl+/` or `F4` (as LazyVim), `F6` moves between text and shell
+- `Ctrl+F` finds in this file (`Space s b`); Enter jumps, `n` / `N` go on
+- Line numbers stay put (absolute); `Space u L` for relative ones
+- Folder tree on the left (`Space e` or `Ctrl+B`, `Tab` moves between tree and text): the git repository around the file (else its folder), the file revealed;
   `Ctrl+H` / `Ctrl+L` between tree and text, `Enter`/`l` open, `h` close, `Backspace` the folder above
 - Pickers that narrow while you type: Find Files (`Space Space`), Recent Files (`Space f r`), Find Text / grep
   (`Space /`), Keymaps (`Space s k`)

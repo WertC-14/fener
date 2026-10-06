@@ -5,6 +5,10 @@
 //!
 //! Keys of an active code tab go to the editor, except Alt+1…9 (tabs). The editor's slow work
 //! (Find Files, grep) runs on worker threads and comes back as [`AppEvent::CodeItems`].
+//!
+//! Each code tab can have a shell under the text (Ctrl+/ or F4, as LazyVim's terminal): F6
+//! moves the keys between the text and the shell, Ctrl+/ in the shell hides it. F5 saves the
+//! file and types its build-and-run command there (`fener_core::run`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,10 +19,14 @@ use fener_core::{Document, Editor, Key, Mode, Request, State, files, tree};
 use liman_core::FileType;
 use liman_core::i18n::trf;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::Span;
+use ratatui::widgets::{Block, BorderType, Widget};
 
 use super::App;
 use crate::event::AppEvent;
+use crate::terminal::{Terminal, shell_quote};
 
 /// Files bigger than this open the old way (desktop app / `$EDITOR`), not in a code tab.
 const MAX_SIZE: u64 = 20 * 1024 * 1024;
@@ -30,6 +38,11 @@ pub struct CodeTab {
     pub id: u64,
     pub editor: Editor,
     pub view: fener_widgets::View,
+    /// The shell under the text, started on first use and kept while hidden.
+    pub terminal: Option<Terminal>,
+    pub term_open: bool,
+    /// Keys go to the shell.
+    pub term_focus: bool,
 }
 
 #[derive(Default)]
@@ -92,6 +105,9 @@ impl App {
             id: self.code.next_id,
             editor,
             view: fener_widgets::View::default(),
+            terminal: None,
+            term_open: false,
+            term_focus: false,
         });
         let i = self.code.tabs.len() - 1;
         self.code.active = Some(i);
@@ -140,7 +156,7 @@ impl App {
         };
         self.code.active = Some(i);
         self.code.tabs[i].editor.message =
-            Some("Unsaved changes: :w saves, :q! drops them, then quit liman again".into());
+            Some("Unsaved changes: :w saves, :q! drops them, then quit fener again".into());
         self.dirty = true;
         true
     }
@@ -156,6 +172,25 @@ impl App {
         let Some(i) = self.code.active else {
             return;
         };
+        let tab = &mut self.code.tabs[i];
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let toggle = key.code == KeyCode::F(4)
+            || (ctrl && matches!(key.code, KeyCode::Char('/' | '_' | '7')));
+        if tab.term_focus && key.code != KeyCode::F(5) {
+            if toggle {
+                tab.term_open = false;
+                tab.term_focus = false;
+            } else if key.code == KeyCode::F(6) {
+                tab.term_focus = false;
+            } else if let Some(term) = &mut tab.terminal {
+                term.send_key(key);
+            }
+            return;
+        }
+        if key.code == KeyCode::F(6) && tab.term_open {
+            tab.term_focus = true;
+            return;
+        }
         let Some(key) = convert(key) else {
             return;
         };
@@ -190,12 +225,48 @@ impl App {
     fn code_requests(&mut self, i: usize) {
         let tab = &mut self.code.tabs[i];
         for request in std::mem::take(&mut tab.editor.requests) {
-            if request == Request::SaveState {
-                // Remembering is a convenience: a read-only home folder must not stop editing.
-                if !self.code.no_state {
-                    let _ = tab.editor.state.save();
+            match request {
+                Request::SaveState => {
+                    // Remembering is a convenience: a read-only home folder must not stop editing.
+                    if !self.code.no_state {
+                        let _ = tab.editor.state.save();
+                    }
+                    continue;
                 }
-                continue;
+                Request::ToggleTerminal => {
+                    let root = tab.editor.root.clone();
+                    if open_terminal(tab, &root, &self.tx) {
+                        tab.term_focus = true;
+                    }
+                    continue;
+                }
+                Request::Run(run) => {
+                    let fresh = tab.terminal.is_none();
+                    if !open_terminal(tab, &run.dir, &self.tx) {
+                        continue;
+                    }
+                    let Some(term) = &mut tab.terminal else {
+                        continue;
+                    };
+                    if !fresh && !term.is_idle() {
+                        tab.editor.message = Some(
+                            "Something still runs in the terminal (Ctrl+C there stops it)".into(),
+                        );
+                        tab.term_focus = true;
+                        continue;
+                    }
+                    // A new shell starts in the right folder; an old one is taken there.
+                    let line = if fresh || term.cwd().as_deref() == Some(run.dir.as_path()) {
+                        format!("{}\r", run.command)
+                    } else {
+                        let dir = shell_quote(&run.dir.to_string_lossy());
+                        format!("cd {dir} && {}\r", run.command)
+                    };
+                    term.type_text(&line);
+                    tab.term_focus = true;
+                    continue;
+                }
+                Request::ListFiles | Request::Grep(_) => {}
             }
             let (id, root, tx) = (tab.id, tab.editor.root.clone(), self.tx.clone());
             let mine = self.code.generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -211,7 +282,7 @@ impl App {
                         let hits = files::grep(&root, &query, MAX_HITS, &cancel);
                         (Kind::Grep, query, picker::grep_items(&root, hits))
                     }
-                    Request::SaveState => return,
+                    _ => return,
                 };
                 if !cancel() {
                     let _ = tx.send(AppEvent::CodeItems {
@@ -234,7 +305,50 @@ impl App {
         let i = self.code.active?;
         let theme = theme_from_liman();
         let tab = &mut self.code.tabs[i];
-        fener_widgets::render(buf, area, &mut tab.editor, &mut tab.view, &theme)
+        let mut text_area = area;
+        let mut term_cursor = None;
+        if tab.term_open
+            && let Some(term) = &mut tab.terminal
+        {
+            let height = (area.height * 35 / 100)
+                .max(8)
+                .min(area.height.saturating_sub(6));
+            let [top, bottom] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(area);
+            text_area = top;
+            let accent = if tab.term_focus {
+                liman_widgets::theme::accent()
+            } else {
+                liman_widgets::theme::dim()
+            };
+            let hint = if tab.term_focus {
+                " Terminal · F6 to the text · Ctrl+/ hide · F5 run again "
+            } else {
+                " Terminal · F6 to type here · Ctrl+/ open "
+            };
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(accent))
+                .title(Span::styled(hint, Style::new().fg(accent)));
+            let inner = block.inner(bottom);
+            block.render(bottom, buf);
+            term_cursor = crate::ui::draw_term_screen(buf, inner, term, tab.term_focus);
+        }
+        let text_cursor =
+            fener_widgets::render(buf, text_area, &mut tab.editor, &mut tab.view, &theme);
+        if tab.term_focus {
+            term_cursor
+        } else {
+            text_cursor
+        }
+    }
+
+    /// The code tab that owns the shell `id`, if any.
+    pub(super) fn code_tab_with_terminal(&mut self, id: u64) -> Option<&mut CodeTab> {
+        self.code
+            .tabs
+            .iter_mut()
+            .find(|t| t.terminal.as_ref().is_some_and(|term| term.id == id))
     }
 
     /// Insert mode and the command line want a bar cursor; `None` when no code tab is shown.
@@ -245,6 +359,22 @@ impl App {
             Mode::Insert | Mode::Command | Mode::Search
         ))
     }
+}
+
+/// Shows the code tab's shell, starting it in `dir` if it is not running. False if it cannot.
+fn open_terminal(tab: &mut CodeTab, dir: &Path, tx: &std::sync::mpsc::Sender<AppEvent>) -> bool {
+    if tab.terminal.is_none() {
+        // The real size comes with the first frame.
+        match Terminal::spawn(dir, 10, 80, tx.clone()) {
+            Ok(term) => tab.terminal = Some(term),
+            Err(e) => {
+                tab.editor.message = Some(format!("Cannot start a shell: {e}"));
+                return false;
+            }
+        }
+    }
+    tab.term_open = true;
+    true
 }
 
 /// fener's colors made from liman's theme, so a code tab looks like the rest of liman.
@@ -288,6 +418,7 @@ fn convert(key: KeyEvent) -> Option<Key> {
         KeyCode::Down => Key::Down,
         KeyCode::Home => Key::Home,
         KeyCode::End => Key::End,
+        KeyCode::F(n) => Key::F(n),
         _ => return None,
     })
 }

@@ -15,6 +15,8 @@ pub enum Kind {
     Grep,
     Keymaps,
     Themes,
+    /// The lines of the open file (Ctrl+F), matched as plain text, not fuzzy.
+    Lines,
 }
 
 /// What choosing an item does.
@@ -28,6 +30,8 @@ pub enum Pick {
     /// A cheat-sheet row: shown, not run.
     Info,
     Theme(usize),
+    /// A line of the open document (0-based).
+    Line(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +90,29 @@ impl Picker {
     /// searched for the query), so only the query is highlighted in them.
     pub fn refilter(&mut self) {
         let query = self.query.as_str();
-        self.matches = if self.kind == Kind::Grep {
+        self.matches = if self.kind == Kind::Lines {
+            let ignore_case = !query.chars().any(char::is_uppercase);
+            let needle = if ignore_case {
+                query.to_lowercase()
+            } else {
+                query.to_string()
+            };
+            self.items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    if ignore_case {
+                        item.text.to_lowercase().contains(&needle)
+                    } else {
+                        item.text.contains(&needle)
+                    }
+                })
+                .map(|(index, item)| Match {
+                    index,
+                    positions: occurrences(query, &item.text),
+                })
+                .collect()
+        } else if self.kind == Kind::Grep {
             (0..self.items.len())
                 .map(|index| Match {
                     index,

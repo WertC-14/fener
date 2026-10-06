@@ -26,6 +26,8 @@ pub enum Key {
     Backspace,
     Delete,
     Tab,
+    /// F1…F12.
+    F(u8),
     Left,
     Right,
     Up,
@@ -185,6 +187,10 @@ pub enum Request {
     Grep(String),
     /// `state` changed (recent files, theme): write it.
     SaveState,
+    /// Show or hide the terminal under the text (and give it the keys).
+    ToggleTerminal,
+    /// Type this command in the terminal (opened in its folder if needed) and run it.
+    Run(crate::run::Run),
 }
 
 /// Text yanked or deleted, and whether it was whole lines.
@@ -271,7 +277,9 @@ impl Editor {
             top: 0,
             view_height: 20,
             number: true,
-            relative_number: true,
+            // Absolute numbers: they stay put while the cursor moves (the user's choice;
+            // LazyVim has relative ones, `Space u L`).
+            relative_number: false,
             quit: false,
             dashboard: None,
             picker: None,
@@ -397,6 +405,21 @@ impl Editor {
                 Key::Ctrl('l') => {
                     self.tree_focus = false;
                     return;
+                }
+                // Tab: between the folder tree and the text (opens the tree if needed).
+                Key::Tab => {
+                    if self.tree.is_some() {
+                        self.tree_focus = !self.tree_focus;
+                    } else {
+                        self.show_tree(true);
+                    }
+                    return;
+                }
+                Key::Ctrl('b') => return self.run_command(Command::Explorer),
+                Key::Ctrl('f') => return self.run_command(Command::SearchLines),
+                Key::F(5) => return self.run_command(Command::Run),
+                Key::F(4) | Key::Ctrl('/' | '_' | '7') => {
+                    return self.run_command(Command::Terminal);
                 }
                 // Space (leader) and `:` work from the tree and the reader too.
                 Key::Char(' ' | ':') => {}
@@ -988,6 +1011,40 @@ impl Editor {
                     self.show_tree(true);
                 }
             }
+            Command::SearchLines => {
+                let path = self.doc.path().map(Path::to_path_buf);
+                let items = (0..text::line_count(&self.doc.rope))
+                    .map(|line| Item {
+                        text: text::line_text(&self.doc.rope, line),
+                        detail: (line + 1).to_string(),
+                        pick: match &path {
+                            Some(p) => Pick::File {
+                                path: p.clone(),
+                                line: Some(line),
+                            },
+                            None => Pick::Line(line),
+                        },
+                    })
+                    .collect();
+                self.picker = Some(Picker::new(Kind::Lines, "Find in File", items));
+            }
+            Command::Run => {
+                let Some(path) = self.doc.path().map(Path::to_path_buf) else {
+                    self.message = Some("Save the file first (:w name)".into());
+                    return;
+                };
+                let file = std::path::absolute(&path).unwrap_or(path);
+                match crate::run::command_for(&file) {
+                    Some(run) => {
+                        if self.doc.is_modified() {
+                            self.save(None);
+                        }
+                        self.requests.push(Request::Run(run));
+                    }
+                    None => self.message = Some("No run command for this kind of file".into()),
+                }
+            }
+            Command::Terminal => self.requests.push(Request::ToggleTerminal),
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
             Command::Quit => self.ex("qa"),
@@ -1200,12 +1257,23 @@ impl Editor {
                 return;
             }
             Key::Enter => {
+                let query = p.query.clone();
+                let lines = p.kind == Kind::Lines;
                 let pick = p
                     .current()
                     .map(|item| (item.pick.clone(), item.detail.clone(), item.text.clone()));
                 self.picker = None;
+                // Find in File: the query stays lit, n / N go on from there.
+                if lines && !query.is_empty() {
+                    self.last_search = Some(query);
+                    self.highlight_search = true;
+                    self.search_forward = true;
+                }
                 match pick {
                     Some((Pick::File { path, line }, ..)) => self.open(&path, line, false),
+                    Some((Pick::Line(line), ..)) => {
+                        self.cursor = text::first_non_blank(&self.doc.rope, line);
+                    }
                     Some((Pick::Command(command), ..)) => self.run_command(command),
                     Some((Pick::Theme(i), ..)) => {
                         self.theme = i;
@@ -2009,9 +2077,10 @@ mod tests {
             Some(vec![
                 (' ', "Find Files"),
                 ('/', "Find Text (Grep)"),
-                ('e', "Explorer (folder tree)"),
+                ('e', "Explorer (folder tree; Ctrl+B)"),
                 ('f', "+file/find"),
                 ('q', "+quit/session"),
+                ('r', "Run / Build the File (F5)"),
                 ('s', "+search"),
                 ('u', "+ui")
             ])
@@ -2087,6 +2156,42 @@ mod tests {
             e.handle_key(k);
         }
         assert!(e.reader);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ctrl_f_finds_in_the_file_and_n_goes_on() {
+        let mut e = ed("|alpha\nbeta\ngamma beta\n");
+        e.handle_key(Key::Ctrl('f'));
+        for k in keys("beta") {
+            e.handle_key(k);
+        }
+        let p = e.picker.as_ref().unwrap();
+        assert_eq!(p.matches.len(), 2);
+        assert_eq!(p.matches[1].positions, vec![6, 7, 8, 9]);
+        e.handle_key(Key::Down);
+        e.handle_key(Key::Enter);
+        assert_eq!(e.line(), 2);
+        assert_eq!(e.last_search.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn f5_saves_and_asks_to_run_and_ctrl_slash_asks_for_the_terminal() {
+        let dir = std::env::temp_dir().join(format!("fener-f5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hi.py");
+        std::fs::write(&file, "print(1)\n").unwrap();
+        let mut e = Editor::new(Document::open(&file).unwrap());
+        e.handle_key(Key::Char('x'));
+        e.handle_key(Key::F(5));
+        assert!(!e.doc.is_modified(), "saved before running");
+        let run = crate::run::Run {
+            dir: dir.clone(),
+            command: "python3 hi.py".into(),
+        };
+        assert!(e.requests.contains(&Request::Run(run)));
+        e.handle_key(Key::Ctrl('/'));
+        assert_eq!(e.requests.last(), Some(&Request::ToggleTerminal));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
