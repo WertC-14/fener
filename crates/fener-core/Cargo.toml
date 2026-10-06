@@ -1,0 +1,14 @@
+[package]
+name = "fener-core"
+description = "UI-independent core of fener: text, changes, undo and the Vim command language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ropey = "1.6"
+
+[lints]
+workspace = true
