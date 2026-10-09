@@ -799,4 +799,38 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&elsewhere).unwrap();
     }
+
+    #[test]
+    fn a_code_tab_splits_into_two_windows_with_a_file_each() {
+        let (dir, mut app, rx) = setup("split");
+        app.code.no_state = true;
+        select(&mut app, "a.txt");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        // Space | : a new window on the right that asks for its file.
+        for c in [' ', '|'] {
+            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        pump(&mut app, &rx, |a| {
+            a.code.tabs[0].editor.picker.as_ref().is_some_and(|p| !p.loading)
+        });
+        for c in "b.txt".chars() {
+            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let tab = &app.code.tabs[0];
+        let name = |e: &fener_core::Editor| e.doc.path().unwrap().file_name().unwrap().to_owned();
+        assert_eq!(name(&tab.editor), "b.txt");
+        assert_eq!(name(&tab.other.as_ref().unwrap().editor), "a.txt");
+        // Ctrl+H: back to the left window; :q closes it, the right one stays.
+        app.handle(key(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert_eq!(name(&app.code.tabs[0].editor), "a.txt");
+        for c in ":q".chars() {
+            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let tab = &app.code.tabs[0];
+        assert!(tab.other.is_none());
+        assert_eq!(name(&tab.editor), "b.txt");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

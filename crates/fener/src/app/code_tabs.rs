@@ -28,6 +28,32 @@ use super::App;
 use crate::event::AppEvent;
 use crate::terminal::{Terminal, shell_quote};
 
+/// The window of a split that does not have the focus.
+pub struct Pane {
+    pub(super) editor: Editor,
+    view: fener_widgets::View,
+    server: Option<u64>,
+    sent_version: u64,
+    sent_modified: bool,
+    lsp_path: Option<std::path::PathBuf>,
+}
+
+impl CodeTab {
+    /// The other window gets the focus (the two trade places in the fields).
+    fn swap_panes(&mut self) {
+        let Some(other) = self.other.as_deref_mut() else {
+            return;
+        };
+        std::mem::swap(&mut self.editor, &mut other.editor);
+        std::mem::swap(&mut self.view, &mut other.view);
+        std::mem::swap(&mut self.server, &mut other.server);
+        std::mem::swap(&mut self.sent_version, &mut other.sent_version);
+        std::mem::swap(&mut self.sent_modified, &mut other.sent_modified);
+        std::mem::swap(&mut self.lsp_path, &mut other.lsp_path);
+        self.other_first = !self.other_first;
+    }
+}
+
 /// Files bigger than this open the old way (desktop app / `$EDITOR`), not in a code tab.
 const MAX_SIZE: u64 = 20 * 1024 * 1024;
 const MAX_FILES: usize = 100_000;
@@ -45,6 +71,14 @@ pub struct CodeTab {
     /// The document version the server has, and whether it was unsaved then.
     sent_version: u64,
     sent_modified: bool,
+    /// The file the server was told about (another file in this pane re-attaches).
+    lsp_path: Option<std::path::PathBuf>,
+    /// The other window of a split (`Space |`, `Space -`); the fields above are the focused one.
+    pub(super) other: Option<Box<Pane>>,
+    /// Side by side (`|`) or one above the other (`-`).
+    vertical: bool,
+    /// The other window is drawn first (left / top).
+    other_first: bool,
     pub term_open: bool,
     /// Keys go to the shell.
     pub term_focus: bool,
@@ -142,6 +176,10 @@ impl App {
             server: None,
             sent_version: 0,
             sent_modified: false,
+            lsp_path: None,
+            other: None,
+            vertical: true,
+            other_first: false,
             term_open: false,
             term_focus: false,
         });
@@ -243,15 +281,43 @@ impl App {
             tab.term_focus = true;
             return;
         }
+        // Ctrl+H/J/K/L between the windows of a split (LazyVim's window keys).
+        let tab = &mut self.code.tabs[i];
+        if ctrl
+            && tab.other.is_some()
+            && tab.editor.mode == Mode::Normal
+            && tab.editor.picker.is_none()
+            && !tab.editor.tree_focus
+        {
+            let first_focused = !tab.other_first;
+            let go = match (tab.vertical, key.code) {
+                (true, KeyCode::Char('l')) => first_focused,
+                (true, KeyCode::Char('h')) => !first_focused,
+                (false, KeyCode::Char('j')) => first_focused,
+                (false, KeyCode::Char('k')) => !first_focused,
+                _ => false,
+            };
+            if go {
+                self.lsp_sync(i);
+                self.code.tabs[i].swap_panes();
+                return;
+            }
+        }
         let Some(key) = convert(key) else {
             return;
         };
         self.code.tabs[i].editor.handle_key(key);
         self.lsp_sync(i);
         self.code_requests(i);
-        // fener sets `quit` only when nothing is unsaved or `:q!` said to drop it.
+        // fener sets `quit` only when nothing is unsaved or `:q!` said to drop it. In a split
+        // only this window closes.
         if self.code.tabs[i].editor.quit {
-            self.close_code_tab(i, true);
+            if self.code.tabs[i].other.is_some() {
+                self.code.tabs[i].editor.quit = false;
+                self.close_pane(i, true);
+            } else {
+                self.close_code_tab(i, true);
+            }
         }
     }
 
@@ -274,6 +340,8 @@ impl App {
             return;
         };
         let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        // Remembered even when no server fits, so it is not tried again on every key.
+        self.code.tabs[i].lsp_path = Some(path.clone());
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -348,8 +416,79 @@ impl App {
         }
     }
 
-    /// Tells code tab `i`'s server about a change (the whole text) or a save.
+    /// `Space |` / `Space -`: a second window in tab `i`, which asks for its file (Find Files).
+    /// Each window has a file of its own: two editors on one file would overwrite each other.
+    fn split(&mut self, i: usize, vertical: bool) {
+        let tab = &mut self.code.tabs[i];
+        if tab.other.is_some() {
+            tab.editor.message =
+                Some("This tab is split already (Space q w closes a window)".into());
+            return;
+        }
+        let mut editor = Editor::new(Document::new(""));
+        editor.root = tab.editor.root.clone();
+        editor.state = State::load();
+        editor.apply_config(&self.code.config);
+        let mut view = fener_widgets::View::default();
+        view.on_ready = tab.view.on_ready.clone();
+        tab.other = Some(Box::new(Pane {
+            editor,
+            view,
+            server: None,
+            sent_version: 0,
+            sent_modified: false,
+            lsp_path: None,
+        }));
+        tab.vertical = vertical;
+        // The new window gets the focus; the old one is drawn first (left / top).
+        tab.other_first = false;
+        tab.swap_panes();
+        tab.editor.run_command(fener_core::Command::FindFiles);
+        self.code_requests(i);
+    }
+
+    /// `Space q w` / `:q` in a split: this window closes, the other one stays.
+    fn close_pane(&mut self, i: usize, force: bool) {
+        let tab = &mut self.code.tabs[i];
+        if tab.other.is_none() {
+            tab.editor.message = Some("Not split (Space | or Space - splits)".into());
+            return;
+        }
+        if tab.editor.doc.is_modified() && !force {
+            tab.editor.message =
+                Some("No write since last change (:w saves, :q! drops the changes)".into());
+            return;
+        }
+        if let (Some(id), Some(path)) = (tab.server, tab.lsp_path.clone())
+            && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
+        {
+            server.client.close(&path);
+        }
+        let tab = &mut self.code.tabs[i];
+        tab.swap_panes();
+        tab.other = None;
+        tab.other_first = false;
+    }
+
+    /// Tells code tab `i`'s server about a change (the whole text) or a save; a different file
+    /// in the window (opened from the tree or a picker) is attached anew.
     fn lsp_sync(&mut self, i: usize) {
+        let current = self.code.tabs[i]
+            .editor
+            .doc
+            .path()
+            .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+        if current.is_some() && current != self.code.tabs[i].lsp_path {
+            let tab = &mut self.code.tabs[i];
+            if let (Some(id), Some(old)) = (tab.server.take(), tab.lsp_path.take())
+                && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
+            {
+                server.client.close(&old);
+            }
+            self.code.tabs[i].editor.lsp = Default::default();
+            self.lsp_attach(i);
+            return;
+        }
         let tab = &mut self.code.tabs[i];
         let (Some(id), Some(path)) = (tab.server, tab.editor.doc.path()) else {
             return;
@@ -399,8 +538,16 @@ impl App {
                 }
             }
             Event::Diagnostics { path, items } => {
-                for tab in self.code.tabs.iter_mut().filter(|t| same(t, &path)) {
-                    tab.editor.lsp.diagnostics = items.clone();
+                for tab in self.code.tabs.iter_mut() {
+                    if same(tab, &path) {
+                        tab.editor.lsp.diagnostics = items.clone();
+                    }
+                    // The window of a split without the focus, too.
+                    if let Some(other) = tab.other.as_deref_mut()
+                        && other.lsp_path.as_deref() == Some(path.as_path())
+                    {
+                        other.editor.lsp.diagnostics = items.clone();
+                    }
                 }
             }
             Event::Hover { path, text } => {
@@ -503,6 +650,8 @@ impl App {
     fn code_requests(&mut self, i: usize) {
         let mut switch_to = None;
         let mut restore = false;
+        let mut split = None;
+        let mut close_window = false;
         let (folders, total) = (self.tabs.count(), self.tabs.count() + self.code.tabs.len());
         let tab = &mut self.code.tabs[i];
         for request in std::mem::take(&mut tab.editor.requests) {
@@ -537,6 +686,14 @@ impl App {
                 }
                 Request::RestoreSession => {
                     restore = true;
+                    continue;
+                }
+                Request::Split { vertical } => {
+                    split = Some(vertical);
+                    continue;
+                }
+                Request::CloseWindow => {
+                    close_window = true;
                     continue;
                 }
                 // Space c f: the formatter gets the text on stdin, on a worker thread.
@@ -649,6 +806,12 @@ impl App {
         if restore {
             self.restore_session();
         }
+        if let Some(vertical) = split {
+            self.split(i, vertical);
+        }
+        if close_window {
+            self.close_pane(i, false);
+        }
     }
 
     /// Draws the active code tab into `area`; returns where the terminal cursor goes.
@@ -688,6 +851,35 @@ impl App {
             let inner = block.inner(bottom);
             block.render(bottom, buf);
             term_cursor = crate::ui::draw_term_screen(buf, inner, term, tab.term_focus);
+        }
+        if let Some(other) = tab.other.as_deref_mut() {
+            // Two windows with a line between them; the focused one gets the cursor.
+            let [a, line, b] = if tab.vertical {
+                Layout::horizontal([
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                ])
+                .areas(text_area)
+            } else {
+                Layout::vertical([
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                ])
+                .areas(text_area)
+            };
+            let rule = if tab.vertical { "│" } else { "─" };
+            for y in line.top()..line.bottom() {
+                for x in line.left()..line.right() {
+                    buf[(x, y)]
+                        .set_symbol(rule)
+                        .set_style(Style::new().fg(liman_widgets::theme::border()));
+                }
+            }
+            let (mine, theirs) = if tab.other_first { (b, a) } else { (a, b) };
+            fener_widgets::render(buf, theirs, &mut other.editor, &mut other.view, &theme);
+            text_area = mine;
         }
         let text_cursor =
             fener_widgets::render(buf, text_area, &mut tab.editor, &mut tab.view, &theme);

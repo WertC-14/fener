@@ -201,6 +201,10 @@ pub enum Request {
     Lazygit,
     /// Space q s: open the files of the last session again.
     RestoreSession,
+    /// Space | / Space -: a second window in this tab (side by side or one above the other).
+    Split { vertical: bool },
+    /// Space q w: close this window of a split.
+    CloseWindow,
     /// Something for the language server, with positions in its units.
     Lsp(LspAsk),
     /// Space c f: run `command` in `dir` with the text on stdin; the result goes to
@@ -1210,6 +1214,9 @@ impl Editor {
             Command::Terminal => self.requests.push(Request::ToggleTerminal),
             Command::Lazygit => self.requests.push(Request::Lazygit),
             Command::Format => self.format_request(),
+            Command::SplitRight => self.requests.push(Request::Split { vertical: true }),
+            Command::SplitBelow => self.requests.push(Request::Split { vertical: false }),
+            Command::CloseWindow => self.requests.push(Request::CloseWindow),
             Command::RestoreSession => self.requests.push(Request::RestoreSession),
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
@@ -2797,6 +2804,7 @@ mod tests {
                 ('↵', "Run (F5)"),
                 (' ', "Find Files"),
                 ('1', "1…9  Go to Tab (1: files)"),
+                ('-', "Split Window Below (another file)"),
                 ('/', "Find Text (Grep)"),
                 ('b', "Build / Check (no run)"),
                 ('c', "+code"),
@@ -2808,7 +2816,8 @@ mod tests {
                 ('s', "+search"),
                 ('t', "Terminal open / close (Ctrl+/)"),
                 ('u', "+ui"),
-                ('w', "Save (Ctrl+S)")
+                ('w', "Save (Ctrl+S)"),
+                ('|', "Split Window Right (another file)")
             ])
         );
         e.handle_key(Key::Char('u'));

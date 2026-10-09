@@ -47,6 +47,8 @@ follows the file: code files get run / build, Markdown files get the reader and 
   - `x X s S D C Y p P J r ~ u Ctrl+R .`, Insert (`i a I A o O`), Visual (`v V`)
 - `Space c f` formats the file with its language's tool (rustfmt, clang-format, ruff, prettier, gofmt, stylua,
   shfmt, taplo; `[format]` in the config overrides), one undo step
+- Split a code tab: `Space |` side by side, `Space -` one above the other (the new window asks for its file);
+  `Ctrl+H/J/K/L` between the windows, `Space q w` or `:q` closes one. Each window has its own file
 - `Shift+H` / `Shift+L` previous / next tab, `Alt+J` / `Alt+K` move lines (Visual: the selection), `gcc` / `gc`
   comment in or out, brackets and quotes close themselves (`[editor] auto-pairs`), `Space g g` lazygit,
   `Space q s` (or `Alt+S` in the files) reopens the files of the last session
@@ -106,7 +108,7 @@ Commands: `run`, `terminal`, `explorer`, `find-files`, `find-in-file`, `find-tex
 
 ## Not yet (on purpose)
 
-LSP, plugins, split windows, a config file for the editor, Obsidian vault.
+Plugins, the same file in two windows, Obsidian vault.
 Find Files does not read `.gitignore` yet (hidden folders, `target`, `node_modules` are skipped).
 
 ## Build
