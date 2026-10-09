@@ -383,6 +383,11 @@ impl App {
     pub fn handle(&mut self, event: AppEvent) {
         match event {
             AppEvent::Tick => self.check_folder(false),
+            AppEvent::CodeFormatted {
+                id,
+                version,
+                result,
+            } => self.on_code_formatted(id, version, result),
             AppEvent::Input(Event::FocusGained) => self.check_folder(true),
             AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 if self.code.active.is_some() {

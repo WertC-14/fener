@@ -16,6 +16,12 @@ use ratatui::crossterm::event::{self, Event};
 #[derive(Debug)]
 pub enum AppEvent {
     Input(Event),
+    /// A formatter's answer for a code tab (Space c f).
+    CodeFormatted {
+        id: u64,
+        version: u64,
+        result: Result<String, String>,
+    },
     /// Every few seconds: the open folder's modification time is checked (see `watch.rs`).
     Tick,
     /// A list a code tab's picker asked for (Find Files, grep), made on a worker.

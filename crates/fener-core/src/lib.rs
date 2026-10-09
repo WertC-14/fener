@@ -8,6 +8,7 @@ pub mod config;
 pub mod document;
 pub mod editor;
 pub mod files;
+pub mod format;
 pub mod fuzzy;
 pub mod picker;
 pub mod run;

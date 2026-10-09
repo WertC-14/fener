@@ -195,6 +195,13 @@ pub enum Request {
     Lazygit,
     /// Space q s: open the files of the last session again.
     RestoreSession,
+    /// Space c f: run `command` in `dir` with the text on stdin; the result goes to
+    /// [`Editor::formatted`] with `version` (stale if the text changed meanwhile).
+    Format {
+        command: String,
+        dir: PathBuf,
+        version: u64,
+    },
     /// List the files under `root` for the Files picker.
     ListFiles,
     /// Search the files under `root` for this text, for the Grep picker.
@@ -1147,6 +1154,7 @@ impl Editor {
             Command::Build => self.run_file(crate::run::Goal::Build),
             Command::Terminal => self.requests.push(Request::ToggleTerminal),
             Command::Lazygit => self.requests.push(Request::Lazygit),
+            Command::Format => self.format_request(),
             Command::RestoreSession => self.requests.push(Request::RestoreSession),
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
@@ -1368,6 +1376,57 @@ impl Editor {
     /// The cursor's line before a move of lines `first..=last` (it is one of them).
     fn line_of_cursor_before(&self, first: usize, last: usize) -> usize {
         self.line().clamp(first, last)
+    }
+
+    fn format_request(&mut self) {
+        let Some(path) = self.doc.path().map(Path::to_path_buf) else {
+            self.message = Some("Save the file first (:w name)".into());
+            return;
+        };
+        let file = std::path::absolute(&path).unwrap_or(path);
+        let configured = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|e| self.config.format.get(e))
+            .map(|t| crate::format::fill(t, &file));
+        match configured.or_else(|| crate::format::command_for(&file)) {
+            Some(command) => {
+                self.message = Some(format!("Formatting: {command}"));
+                self.requests.push(Request::Format {
+                    command,
+                    dir: file.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    version: self.doc.version(),
+                });
+            }
+            None => {
+                self.message =
+                    Some("No formatter for this kind of file ([format] in the config)".into())
+            }
+        }
+    }
+
+    /// The formatter's answer: the new text (one undo step; the cursor stays on its line and
+    /// column), or its error. Dropped when the text changed since the request.
+    pub fn formatted(&mut self, version: u64, result: Result<String, String>) {
+        if version != self.doc.version() {
+            return;
+        }
+        match result {
+            Ok(text) if self.doc.rope == text.as_str() => {
+                self.message = Some("Already formatted".into());
+            }
+            Ok(text) => {
+                let (line, col) = (self.line(), self.col());
+                self.doc.begin_step(self.cursor);
+                self.doc.edit(0, self.doc.rope.len_chars(), &text);
+                let last = text::line_count(&self.doc.rope).saturating_sub(1);
+                self.cursor = text::at_col(&self.doc.rope, line.min(last), col, false);
+                self.doc.end_step(self.cursor);
+                self.clamp();
+                self.message = Some("Formatted".into());
+            }
+            Err(e) => self.message = Some(format!("Format failed: {e}")),
+        }
     }
 
     /// F5 / `Space Enter` / `Space b`: saves, then asks the app to type the file's run (or
@@ -2462,6 +2521,7 @@ mod tests {
                 ('1', "1…9  Go to Tab (1: files)"),
                 ('/', "Find Text (Grep)"),
                 ('b', "Build / Check (no run)"),
+                ('c', "+code"),
                 ('e', "Explorer (folder tree; Ctrl+B)"),
                 ('f', "+file/find"),
                 ('g', "+git"),
@@ -2858,5 +2918,20 @@ mod tests {
                 Request::RestoreSession
             ]
         );
+    }
+
+    #[test]
+    fn formatted_text_is_one_undo_step_and_stale_answers_are_dropped() {
+        let mut e = ed("a\n|b\n");
+        let v = e.doc.version();
+        e.formatted(v, Ok("a\n  b\n".into()));
+        assert_eq!((e.doc.rope.to_string().as_str(), e.line()), ("a\n  b\n", 1));
+        e.handle_key(Key::Char('u'));
+        assert_eq!(e.doc.rope.to_string(), "a\nb\n");
+        // The text changed after the request: the answer is ignored.
+        let old = e.doc.version();
+        e.handle_key(Key::Char('x'));
+        e.formatted(old, Ok("zzz\n".into()));
+        assert_ne!(e.doc.rope.to_string(), "zzz\n");
     }
 }

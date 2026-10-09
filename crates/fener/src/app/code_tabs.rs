@@ -230,6 +230,19 @@ impl App {
         self.dirty = true;
     }
 
+    /// A formatter finished for code tab `id`.
+    pub(super) fn on_code_formatted(
+        &mut self,
+        id: u64,
+        version: u64,
+        result: Result<String, String>,
+    ) {
+        if let Some(tab) = self.code.tabs.iter_mut().find(|t| t.id == id) {
+            tab.editor.formatted(version, result);
+            self.dirty = true;
+        }
+    }
+
     /// A worker's list for a code tab's picker.
     pub(super) fn on_code_items(&mut self, id: u64, kind: Kind, query: &str, items: Vec<Item>) {
         if let Some(tab) = self.code.tabs.iter_mut().find(|t| t.id == id) {
@@ -276,6 +289,24 @@ impl App {
                 }
                 Request::RestoreSession => {
                     restore = true;
+                    continue;
+                }
+                // Space c f: the formatter gets the text on stdin, on a worker thread.
+                Request::Format {
+                    command,
+                    dir,
+                    version,
+                } => {
+                    let text = tab.editor.doc.rope.to_string();
+                    let (id, tx) = (tab.id, self.tx.clone());
+                    std::thread::spawn(move || {
+                        let result = run_formatter(&command, &dir, &text);
+                        let _ = tx.send(AppEvent::CodeFormatted {
+                            id,
+                            version,
+                            result,
+                        });
+                    });
                     continue;
                 }
                 // Space t, Ctrl+/: open the shell and type there, or close it if it is open.
@@ -454,6 +485,46 @@ impl App {
             editor.mode,
             Mode::Insert | Mode::Command | Mode::Search
         ))
+    }
+}
+
+/// Runs a formatter: `text` on stdin, the formatted text from stdout, or the first line of
+/// what it said on stderr.
+fn run_formatter(command: &str, dir: &Path, text: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", command])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let input = text.to_string();
+    // Written from its own thread: a big file must not fill the pipe while stdout waits.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let _ = writer.join();
+    if output.status.success() {
+        String::from_utf8(output.stdout).map_err(|e| e.to_string())
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let first = err
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        Err(if output.status.code() == Some(127) {
+            format!(
+                "{} is not installed",
+                command.split_whitespace().next().unwrap_or(command)
+            )
+        } else if first.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            first.to_string()
+        })
     }
 }
 

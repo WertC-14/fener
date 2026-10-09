@@ -12,6 +12,7 @@ pub enum Command {
     Headings,
     Terminal,
     Lazygit,
+    Format,
     RestoreSession,
     RecentFiles,
     FindText,
@@ -39,6 +40,7 @@ impl Command {
             Self::Headings => "headings",
             Self::Terminal => "terminal",
             Self::Lazygit => "lazygit",
+            Self::Format => "format",
             Self::RestoreSession => "restore-session",
             Self::RecentFiles => "recent-files",
             Self::FindText => "find-text",
@@ -154,6 +156,7 @@ pub const COMMANDS: &[Binding] = &[
         "Restore Session (last open files)",
     ),
     bind(Command::Lazygit, "gg", "Lazygit"),
+    bind(Command::Format, "cf", "Format File"),
     bind(Command::Dashboard, "", "Start Screen (:Dashboard)"),
 ];
 
@@ -163,6 +166,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("s", "+search"),
     ("u", "+ui"),
     ("g", "+git"),
+    ("c", "+code"),
     ("q", "+quit/session"),
 ];
 

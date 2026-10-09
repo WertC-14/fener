@@ -45,6 +45,8 @@ follows the file: code files get run / build, Markdown files get the reader and 
   - motions: `h j k l`, `w W b B e E`, `0 ^ $`, `gg G` (`5G`), `f t F T ; ,`, `{ }`, `%`, `n N`, `*`
   - operators: `d c y > <` (`dd cc yy >> <<`), text objects `iw aw iW aW i" a" i' i( a( i[ i{ i<` ...
   - `x X s S D C Y p P J r ~ u Ctrl+R .`, Insert (`i a I A o O`), Visual (`v V`)
+- `Space c f` formats the file with its language's tool (rustfmt, clang-format, ruff, prettier, gofmt, stylua,
+  shfmt, taplo; `[format]` in the config overrides), one undo step
 - `Shift+H` / `Shift+L` previous / next tab, `Alt+J` / `Alt+K` move lines (Visual: the selection), `gcc` / `gc`
   comment in or out, brackets and quotes close themselves (`[editor] auto-pairs`), `Space g g` lazygit,
   `Space q s` (or `Alt+S` in the files) reopens the files of the last session
