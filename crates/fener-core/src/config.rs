@@ -34,6 +34,8 @@ pub struct Config {
     pub build: HashMap<String, String>,
     /// File extension → `Space c f` formatter (stdin → stdout; `{file}` is the file's name).
     pub format: HashMap<String, String>,
+    /// File extension → language server command (`""` turns it off).
+    pub lsp: HashMap<String, String>,
     /// Key (`F9`, `ctrl-t`) → command name (`run`, `terminal`, ...).
     pub keys: HashMap<String, String>,
 }

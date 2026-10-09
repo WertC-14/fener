@@ -17,6 +17,8 @@ pub enum Kind {
     Themes,
     /// The lines of the open file (Ctrl+F), matched as plain text, not fuzzy.
     Lines,
+    /// Places in files (LSP references): drawn like grep results, matched like lines.
+    Locations,
 }
 
 /// What choosing an item does.
@@ -90,7 +92,7 @@ impl Picker {
     /// searched for the query), so only the query is highlighted in them.
     pub fn refilter(&mut self) {
         let query = self.query.as_str();
-        self.matches = if self.kind == Kind::Lines {
+        self.matches = if matches!(self.kind, Kind::Lines | Kind::Locations) {
             let ignore_case = !query.chars().any(char::is_uppercase);
             let needle = if ignore_case {
                 query.to_lowercase()

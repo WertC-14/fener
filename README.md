@@ -64,6 +64,24 @@ The file manager itself is liman's: grid / normal / detailed views, Places, prev
 tabs, themes. Its guide: [liman's KILAVUZ](https://github.com/WertC-14/liman/blob/main/docs/KILAVUZ.md).
 Settings are shared with liman (`~/.config/liman/config`).
 
+## Language servers
+
+Errors and warnings (underlined, the message at the end of the line, `]d` / `[d` to walk them), `K` for what is
+under the cursor, `gd` to the definition (another file opens in its own tab), `gr` for the references, and a
+completion menu while typing (arrows or `Ctrl+N` / `Ctrl+P` choose, `Tab` / `Enter` take it). fener starts the
+server itself; it only has to be installed:
+
+| Language | Server | Install (Arch) |
+|---|---|---|
+| Rust | rust-analyzer | `rustup component add rust-analyzer` |
+| C / C++ | clangd | `pacman -S clang` |
+| Python | pyright | `pacman -S pyright` |
+| JS / TS | typescript-language-server | `npm i -g typescript typescript-language-server` |
+| Lua, Bash, Go, TOML | lua-language-server, bash-language-server, gopls, taplo | their packages |
+
+`[lsp]` in the config file changes a server (`py = "basedpyright-langserver --stdio"`) or turns one off (`py = ""`).
+`FENER_LSP_DEBUG=1` prints the servers' answers to stderr.
+
 ## Settings
 
 `~/.config/fener/config.toml` (all optional; a mistake is reported in the first code tab and ignored):

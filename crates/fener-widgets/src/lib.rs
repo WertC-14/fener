@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use fener_core::command::DASHBOARD;
 use fener_core::highlight;
+use fener_core::lsp;
 use fener_core::picker::{Kind, Picker};
 use fener_core::syntax::{self, Kind as TextKind, Lang};
 use fener_core::text;
@@ -208,6 +209,19 @@ pub fn render(
         draw_status(buf, status, editor);
     }
     let command_cursor = draw_command_line(buf, command, editor);
+    if let Some(at) = cursor {
+        if let Some(menu) = &editor.lsp.completion {
+            draw_completion(
+                buf,
+                body,
+                at,
+                menu,
+                editor.cursor.saturating_sub(menu.start),
+            );
+        } else if let Some(text) = &editor.lsp.hover {
+            draw_hover(buf, body, at, text);
+        }
+    }
     if let Some(menu) = editor.leader_menu() {
         // The title says which menu this is: the keys change with the file (code / Markdown).
         let title = format!("{} {}", editor.pending_keys(), editor.context().label());
@@ -257,6 +271,23 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         view.left = cursor_screen_col + margin + 1 - width;
     }
     let matches = search_matches(editor, area.height);
+    // Diagnostics on screen as char ranges, and the worst one (and its message) per line.
+    let diags: Vec<(usize, usize, lsp::Severity, usize, &str)> = editor
+        .lsp
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let from = lsp::to_char(rope, d.start, editor.lsp.encoding);
+            let to = lsp::to_char(rope, d.end, editor.lsp.encoding).max(from + 1);
+            (from, to, d.severity, d.start.line, d.message.as_str())
+        })
+        .collect();
+    let worst_on = |line: usize| {
+        diags
+            .iter()
+            .filter(|d| d.3 == line && d.2 <= lsp::Severity::Warning)
+            .min_by_key(|d| d.2)
+    };
     let lang = editor.doc.path().map_or(Lang::Plain, Lang::from_path);
     // tree-sitter when the language has a grammar. Until the worker has colors for this version,
     // the last ones are used (a few characters may be off for a moment while typing).
@@ -298,6 +329,13 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
                     format!("{n:<w$} ", w = gutter - 1),
                     Style::new().fg(t().orange).add_modifier(Modifier::BOLD),
                 )
+            } else if let Some(d) = worst_on(line) {
+                (
+                    format!("{:>w$} ", line + 1, w = gutter - 1),
+                    Style::new()
+                        .fg(severity_color(d.2))
+                        .add_modifier(Modifier::BOLD),
+                )
             } else if editor.relative_number {
                 (
                     format!("{:>w$} ", line.abs_diff(cursor_line), w = gutter - 1),
@@ -335,6 +373,16 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
                 if selection.is_some_and(|(a, b)| pos >= a && pos < b) {
                     style = style.bg(t().bg_visual);
                 }
+                // A diagnostic's range is underlined in its color (LazyVim: undercurl).
+                if let Some(d) = diags
+                    .iter()
+                    .filter(|d| pos >= d.0 && pos < d.1 && d.2 <= lsp::Severity::Warning)
+                    .min_by_key(|d| d.2)
+                {
+                    style = style
+                        .add_modifier(Modifier::UNDERLINED)
+                        .underline_color(severity_color(d.2));
+                }
                 let symbol = if c == '\t' {
                     " ".repeat(w)
                 } else {
@@ -350,6 +398,22 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         // An empty line in a Visual Line selection still shows one selected cell.
         if len == 0 && selection.is_some_and(|(a, b)| start >= a && start <= b) && view.left == 0 {
             buf.set_style(Rect::new(x0, y, 1, 1), Style::new().bg(t().bg_visual));
+        }
+        // The line's worst diagnostic after its end, as LazyVim's virtual text.
+        if let Some(d) = worst_on(line) {
+            let at = col.saturating_sub(view.left) + 3;
+            if at + 4 < width {
+                let text = format!("● {}", d.4.lines().next().unwrap_or(""));
+                buf.set_stringn(
+                    x0 + at as u16,
+                    y,
+                    text,
+                    width - at,
+                    Style::new()
+                        .fg(severity_color(d.2))
+                        .add_modifier(Modifier::ITALIC),
+                );
+            }
         }
         if is_cursor_line && editor.cursor == start + len {
             // On the end of the line (Insert mode, or an empty line).
@@ -404,6 +468,133 @@ fn kinds_from_spans(spans: &[highlight::Span], line_byte: usize, content: &str) 
         byte += c.len_utf8();
     }
     kinds
+}
+
+fn severity_color(severity: lsp::Severity) -> Color {
+    match severity {
+        lsp::Severity::Error => t().red,
+        lsp::Severity::Warning => t().yellow,
+        lsp::Severity::Info => t().blue,
+        lsp::Severity::Hint => t().fg_dim,
+    }
+}
+
+/// `K`'s answer in a box under (or over) the cursor, as formatted Markdown.
+fn draw_hover(buf: &mut Buffer, area: Rect, cursor: (u16, u16), text: &str) {
+    let width = area.width.saturating_sub(4).min(80);
+    if width < 20 {
+        return;
+    }
+    let inner_width = usize::from(width - 2);
+    // Compact: code without its fence frame, blank lines merged.
+    let mut in_code = false;
+    let mut rows: Vec<Line> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        let spans = if in_code {
+            vec![Span::styled(line.to_string(), Style::new().fg(t().green))]
+        } else {
+            let mut plain = false;
+            markdown::line(line, &mut plain, inner_width)
+        };
+        let blank = line.trim().is_empty();
+        if blank && rows.last().is_none_or(|l| l.width() == 0) {
+            continue;
+        }
+        rows.extend(markdown::wrap(spans, inner_width));
+    }
+    while rows.last().is_some_and(|l| l.width() == 0) {
+        rows.pop();
+    }
+    let height = (rows.len() as u16 + 2)
+        .min(area.height.saturating_sub(2) / 2)
+        .max(3);
+    let below = cursor.1 + 1 + height <= area.bottom();
+    let y = if below {
+        cursor.1 + 1
+    } else {
+        cursor.1.saturating_sub(height)
+    };
+    let x = cursor.0.min(area.right().saturating_sub(width)).max(area.x);
+    let rect = Rect::new(x, y, width, height);
+    Clear.render(rect, buf);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(t().blue))
+        .style(Style::new().bg(t().bg_dark));
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+    for (i, row) in rows.into_iter().take(usize::from(inner.height)).enumerate() {
+        row.render(Rect::new(inner.x, inner.y + i as u16, inner.width, 1), buf);
+    }
+}
+
+/// The completion menu under the word being typed.
+fn draw_completion(
+    buf: &mut Buffer,
+    area: Rect,
+    cursor: (u16, u16),
+    menu: &fener_core::CompletionMenu,
+    typed: usize,
+) {
+    let rows = menu.shown.len().min(10);
+    if rows == 0 {
+        return;
+    }
+    let first = menu.selected.saturating_sub(rows - 1);
+    let label_w = menu
+        .shown
+        .iter()
+        .map(|&i| menu.items[i].label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(40);
+    let width = (label_w + 30).min(usize::from(area.width).saturating_sub(2)) as u16;
+    let height = rows as u16 + 2;
+    let x = cursor
+        .0
+        .saturating_sub(typed as u16 + 1)
+        .min(area.right().saturating_sub(width));
+    let y = if cursor.1 + 1 + height <= area.bottom() {
+        cursor.1 + 1
+    } else {
+        cursor.1.saturating_sub(height)
+    };
+    let rect = Rect::new(x.max(area.x), y, width, height);
+    Clear.render(rect, buf);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(t().gutter))
+        .style(Style::new().bg(t().bg_dark));
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+    for (row, (n, &i)) in menu
+        .shown
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .enumerate()
+    {
+        let item = &menu.items[i];
+        let y = inner.y + row as u16;
+        let chosen = n == menu.selected;
+        let bg = if chosen { t().bg_line } else { t().bg_dark };
+        buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(bg));
+        let line = Line::from(vec![
+            Span::styled(format!("{:<6}", item.kind), Style::new().fg(t().magenta)),
+            Span::styled(
+                format!("{:<w$} ", item.label, w = label_w),
+                Style::new().fg(if chosen { t().blue } else { t().fg }),
+            ),
+            Span::styled(item.detail.clone(), Style::new().fg(t().fg_dim)),
+        ]);
+        line.render(Rect::new(inner.x, y, inner.width, 1), buf);
+    }
 }
 
 /// The color of a kind of text (tokyonight's choices: keywords purple, functions blue,
@@ -534,6 +725,21 @@ fn draw_command_line(buf: &mut Buffer, area: Rect, editor: &Editor) -> Option<(u
         Mode::Command => ":",
         Mode::Search => "/",
         _ => {
+            let diagnostic = editor
+                .lsp
+                .diagnostics
+                .iter()
+                .filter(|d| d.start.line == editor.line())
+                .min_by_key(|d| d.severity);
+            if editor.message.is_none()
+                && let Some(d) = diagnostic
+            {
+                let text = d.message.lines().next().unwrap_or("");
+                Paragraph::new(text)
+                    .style(Style::new().fg(severity_color(d.severity)).bg(t().bg))
+                    .render(area, buf);
+                return None;
+            }
             if let Some(message) = &editor.message {
                 let color = if message.starts_with("Not ")
                     || message.starts_with("No ")
@@ -814,15 +1020,12 @@ fn draw_picker(buf: &mut Buffer, area: Rect, picker: &Picker) -> Option<(u16, u1
         }
         let mut spans = Vec::new();
         match picker.kind {
-            Kind::Files | Kind::Recent | Kind::Grep => {
-                let path = if picker.kind == Kind::Grep {
-                    &item.detail
-                } else {
-                    &item.text
-                };
+            Kind::Files | Kind::Recent | Kind::Grep | Kind::Locations => {
+                let located = matches!(picker.kind, Kind::Grep | Kind::Locations);
+                let path = if located { &item.detail } else { &item.text };
                 let (icon, color) = file_icon(path.split(':').next().unwrap_or(path));
                 spans.push(Span::styled(icon, Style::new().fg(color)));
-                if picker.kind == Kind::Grep {
+                if located {
                     spans.push(Span::styled(
                         format!("{} ", item.detail),
                         Style::new().fg(t().fg_dim),

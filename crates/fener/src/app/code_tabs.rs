@@ -40,6 +40,11 @@ pub struct CodeTab {
     pub view: fener_widgets::View,
     /// The shell under the text, started on first use and kept while hidden.
     pub terminal: Option<Terminal>,
+    /// The language server this file talks to (an id in `CodeTabs::servers`).
+    server: Option<u64>,
+    /// The document version the server has, and whether it was unsaved then.
+    sent_version: u64,
+    sent_modified: bool,
     pub term_open: bool,
     /// Keys go to the shell.
     pub term_focus: bool,
@@ -59,6 +64,20 @@ pub struct CodeTabs {
     pub config: fener_core::config::Config,
     /// What was wrong with the config file; shown once, in the first code tab.
     pub config_error: Option<String>,
+    /// Running language servers, one per (command, project root).
+    servers: Vec<Server>,
+    /// Servers that could not start (said once, not tried again).
+    missing: std::collections::HashSet<String>,
+}
+
+/// A language server and what it is for.
+struct Server {
+    id: u64,
+    command: Vec<String>,
+    root: std::path::PathBuf,
+    client: fener_core::lsp::Client,
+    /// Columns in its units once it answered `initialize`.
+    encoding: Option<fener_core::lsp::Encoding>,
 }
 
 impl CodeTabs {
@@ -120,11 +139,15 @@ impl App {
             editor,
             view,
             terminal: None,
+            server: None,
+            sent_version: 0,
+            sent_modified: false,
             term_open: false,
             term_focus: false,
         });
         let i = self.code.tabs.len() - 1;
         self.code.active = Some(i);
+        self.lsp_attach(i);
         self.code_requests(i);
     }
 
@@ -150,7 +173,14 @@ impl App {
                 Some("No write since last change (:w saves, :q! drops the changes)".into());
             return;
         }
-        self.code.tabs.remove(i);
+        let closed = self.code.tabs.remove(i);
+        if let (Some(id), Some(path)) = (closed.server, closed.editor.doc.path())
+            && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
+        {
+            server
+                .client
+                .close(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+        }
         self.code.active = match self.code.active {
             Some(a) if a == i => None,
             Some(a) if a > i => Some(a - 1),
@@ -217,6 +247,7 @@ impl App {
             return;
         };
         self.code.tabs[i].editor.handle_key(key);
+        self.lsp_sync(i);
         self.code_requests(i);
         // fener sets `quit` only when nothing is unsaved or `:q!` said to drop it.
         if self.code.tabs[i].editor.quit {
@@ -232,7 +263,216 @@ impl App {
             let key = if c == '\n' { Key::Enter } else { Key::Char(c) };
             self.code.tabs[i].editor.handle_key(key);
         }
+        self.lsp_sync(i);
         self.dirty = true;
+    }
+
+    /// Starts (or reuses) the language server for code tab `i` and opens its document there.
+    fn lsp_attach(&mut self, i: usize) {
+        use fener_core::lsp;
+        let Some(path) = self.code.tabs[i].editor.doc.path() else {
+            return;
+        };
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+        let command = match self.code.config.lsp.get(&ext) {
+            Some(c) if c.trim().is_empty() => return,
+            Some(c) => c.split_whitespace().map(String::from).collect(),
+            None => match lsp::server_for(&path) {
+                Some(c) => c,
+                None => return,
+            },
+        };
+        let root = lsp::root_for(&path);
+        let id = match self
+            .code
+            .servers
+            .iter()
+            .find(|s| s.command == command && s.root == root)
+        {
+            Some(s) => s.id,
+            None => {
+                if self.code.missing.contains(&command[0]) {
+                    return;
+                }
+                self.code.next_id += 1;
+                let id = self.code.next_id;
+                let tx = self.tx.clone();
+                let started = lsp::Client::start(&command, &root, move |event| {
+                    let _ = tx.send(AppEvent::Lsp {
+                        server: id,
+                        event: Box::new(event),
+                    });
+                });
+                match started {
+                    Ok(client) => self.code.servers.push(Server {
+                        id,
+                        command: command.clone(),
+                        root,
+                        client,
+                        encoding: None,
+                    }),
+                    Err(e) => {
+                        self.code.tabs[i].editor.message = Some(format!(
+                            "No language server: {} ({e}); see README, Language servers",
+                            command[0]
+                        ));
+                        self.code.missing.insert(command[0].clone());
+                        return;
+                    }
+                }
+                id
+            }
+        };
+        let tab = &mut self.code.tabs[i];
+        let server = self
+            .code
+            .servers
+            .iter()
+            .find(|s| s.id == id)
+            .expect("just found");
+        let version = tab.editor.doc.version();
+        server
+            .client
+            .open(&path, version, &tab.editor.doc.rope.to_string());
+        tab.server = Some(id);
+        tab.sent_version = version;
+        tab.sent_modified = tab.editor.doc.is_modified();
+        if let Some(encoding) = server.encoding {
+            tab.editor.lsp.active = true;
+            tab.editor.lsp.encoding = encoding;
+        }
+    }
+
+    /// Tells code tab `i`'s server about a change (the whole text) or a save.
+    fn lsp_sync(&mut self, i: usize) {
+        let tab = &mut self.code.tabs[i];
+        let (Some(id), Some(path)) = (tab.server, tab.editor.doc.path()) else {
+            return;
+        };
+        let Some(server) = self.code.servers.iter().find(|s| s.id == id) else {
+            return;
+        };
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let version = tab.editor.doc.version();
+        if version != tab.sent_version {
+            server
+                .client
+                .change(&path, version, &tab.editor.doc.rope.to_string());
+            tab.sent_version = version;
+        }
+        let modified = tab.editor.doc.is_modified();
+        if tab.sent_modified && !modified {
+            server.client.save(&path);
+        }
+        tab.sent_modified = modified;
+    }
+
+    /// A language server's answer, to the tabs it is for.
+    pub(super) fn on_lsp(&mut self, server: u64, event: fener_core::lsp::Event) {
+        use fener_core::lsp::Event;
+        self.dirty = true;
+        let same = |tab: &CodeTab, path: &std::path::Path| {
+            tab.editor
+                .doc
+                .path()
+                .and_then(|p| std::path::absolute(p).ok())
+                .is_some_and(|p| p == path)
+        };
+        match event {
+            Event::Ready(encoding) => {
+                if let Some(s) = self.code.servers.iter_mut().find(|s| s.id == server) {
+                    s.encoding = Some(encoding);
+                }
+                for tab in self
+                    .code
+                    .tabs
+                    .iter_mut()
+                    .filter(|t| t.server == Some(server))
+                {
+                    tab.editor.lsp.active = true;
+                    tab.editor.lsp.encoding = encoding;
+                }
+            }
+            Event::Diagnostics { path, items } => {
+                for tab in self.code.tabs.iter_mut().filter(|t| same(t, &path)) {
+                    tab.editor.lsp.diagnostics = items.clone();
+                }
+            }
+            Event::Hover { path, text } => {
+                if let Some(tab) = self.code.tabs.iter_mut().find(|t| same(t, &path)) {
+                    tab.editor.show_hover(text);
+                }
+            }
+            Event::Completion { path, items, .. } => {
+                if let Some(tab) = self.code.tabs.iter_mut().find(|t| same(t, &path)) {
+                    tab.editor.show_completion(items);
+                }
+            }
+            Event::Definition { path, items } => {
+                let Some(target) = items.first().cloned() else {
+                    if let Some(tab) = self.code.tabs.iter_mut().find(|t| same(t, &path)) {
+                        tab.editor.message = Some("No definition found".into());
+                    }
+                    return;
+                };
+                // Another file opens in its own tab (as a buffer would in LazyVim).
+                if target.path != path {
+                    self.open_code_tab(&target.path);
+                }
+                if let Some(tab) = self.code.tabs.iter_mut().find(|t| same(t, &target.path)) {
+                    tab.editor.jump_to(target.pos);
+                }
+            }
+            Event::References { path, items } => {
+                let places = items
+                    .into_iter()
+                    .map(|loc| {
+                        // The line's text from an open tab, else from the file.
+                        let text = self
+                            .code
+                            .tabs
+                            .iter()
+                            .find(|t| same(t, &loc.path))
+                            .map(|t| fener_core::text::line_text(&t.editor.doc.rope, loc.pos.line))
+                            .or_else(|| {
+                                std::fs::read_to_string(&loc.path)
+                                    .ok()?
+                                    .lines()
+                                    .nth(loc.pos.line)
+                                    .map(String::from)
+                            })
+                            .unwrap_or_default();
+                        (loc.path, loc.pos.line, text)
+                    })
+                    .collect();
+                if let Some(tab) = self.code.tabs.iter_mut().find(|t| same(t, &path)) {
+                    tab.editor.show_references(places);
+                }
+            }
+            Event::Notice { path, text } => {
+                if let Some(tab) = self.code.tabs.iter_mut().find(|t| same(t, &path)) {
+                    tab.editor.message = Some(text);
+                }
+            }
+            Event::Failed(why) => {
+                self.code.servers.retain(|s| s.id != server);
+                for tab in self
+                    .code
+                    .tabs
+                    .iter_mut()
+                    .filter(|t| t.server == Some(server))
+                {
+                    tab.server = None;
+                    tab.editor.lsp = Default::default();
+                    tab.editor.message = Some(format!("Language server: {why}"));
+                }
+            }
+        }
     }
 
     /// A formatter finished for code tab `id`.
@@ -245,6 +485,9 @@ impl App {
         if let Some(tab) = self.code.tabs.iter_mut().find(|t| t.id == id) {
             tab.editor.formatted(version, result);
             self.dirty = true;
+        }
+        if let Some(i) = self.code.tabs.iter().position(|t| t.id == id) {
+            self.lsp_sync(i);
         }
     }
 
@@ -352,6 +595,24 @@ impl App {
                     };
                     term.type_text(&line);
                     tab.term_focus = true;
+                    continue;
+                }
+                Request::Lsp(ask) => {
+                    let (Some(server), Some(path)) = (tab.server, tab.editor.doc.path()) else {
+                        continue;
+                    };
+                    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+                    if let Some(s) = self.code.servers.iter().find(|s| s.id == server) {
+                        use fener_core::LspAsk;
+                        match ask {
+                            LspAsk::Hover(pos) => s.client.hover(&path, pos),
+                            LspAsk::Definition(pos) => s.client.definition(&path, pos),
+                            LspAsk::References(pos) => s.client.references(&path, pos),
+                            LspAsk::Completion(pos, version) => {
+                                s.client.completion(&path, pos, version)
+                            }
+                        }
+                    }
                     continue;
                 }
                 Request::ListFiles | Request::Grep(_) => {}

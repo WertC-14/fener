@@ -15,6 +15,7 @@ use crate::command::{
 };
 use crate::config::{Config, LineNumbers};
 use crate::document::Document;
+use crate::lsp;
 use crate::picker::{Item, Kind, Pick, Picker};
 use crate::state::State;
 use crate::syntax::Lang;
@@ -161,6 +162,11 @@ enum Action {
     HalfPageUp,
     Save,
     Center,
+    // Language server (ADR 0016).
+    Hover,
+    Definition,
+    References,
+    NextDiagnostic { forward: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +201,8 @@ pub enum Request {
     Lazygit,
     /// Space q s: open the files of the last session again.
     RestoreSession,
+    /// Something for the language server, with positions in its units.
+    Lsp(LspAsk),
     /// Space c f: run `command` in `dir` with the text on stdin; the result goes to
     /// [`Editor::formatted`] with `version` (stale if the text changed meanwhile).
     Format {
@@ -212,6 +220,39 @@ pub enum Request {
     ToggleTerminal,
     /// Type this command in the terminal (opened in its folder if needed) and run it.
     Run(crate::run::Run),
+}
+
+/// A question for the language server (ADR 0016).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspAsk {
+    Hover(lsp::Pos),
+    Definition(lsp::Pos),
+    References(lsp::Pos),
+    /// With the document version it was asked for.
+    Completion(lsp::Pos, u64),
+}
+
+/// What the language server told this document, and its pop-ups.
+#[derive(Debug, Default)]
+pub struct LspState {
+    /// A server is attached (`K`, `gd`, completion ask it).
+    pub active: bool,
+    pub encoding: lsp::Encoding,
+    pub diagnostics: Vec<lsp::Diagnostic>,
+    /// `K`: the answer, shown until the next key.
+    pub hover: Option<String>,
+    pub completion: Option<CompletionMenu>,
+}
+
+/// The completion pop-up in Insert mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionMenu {
+    pub items: Vec<lsp::Completion>,
+    /// Indices into `items` that fit the word typed so far, best first.
+    pub shown: Vec<usize>,
+    pub selected: usize,
+    /// Where the word being completed starts (char index).
+    pub start: usize,
 }
 
 /// Text yanked or deleted, and whether it was whole lines.
@@ -276,6 +317,8 @@ pub struct Editor {
     pub indent: usize,
     /// Brackets and quotes close themselves (`[editor] auto-pairs`; LazyVim: mini.pairs).
     pub auto_pairs: bool,
+    /// The language server's diagnostics, hover and completion for this document.
+    pub lsp: LspState,
     /// Keys from the config file's `[keys]`, checked before the built-in ones.
     pub keymap: HashMap<Key, Command>,
     /// The config file (`[run]` commands, options for new tabs).
@@ -323,6 +366,7 @@ impl Editor {
             reader_top: 0,
             indent: 2,
             auto_pairs: true,
+            lsp: LspState::default(),
             keymap: HashMap::new(),
             config: Config::default(),
         }
@@ -434,6 +478,13 @@ impl Editor {
         }
         if self.picker.is_some() {
             self.picker_key(key);
+            return;
+        }
+        // The hover box goes with the next key (Esc only closes it).
+        if self.lsp.hover.take().is_some() && key == Key::Esc {
+            return;
+        }
+        if self.mode == Mode::Insert && self.lsp.completion.is_some() && self.completion_key(key) {
             return;
         }
         // IDE habits that work in every mode: Ctrl+Z / Ctrl+Y undo and redo, and in a Markdown
@@ -964,6 +1015,10 @@ impl Editor {
                 self.cursor = text::at_col(&self.doc.rope, target, col, false);
             }
             Action::Save => self.save(None),
+            Action::Hover => self.ask_lsp(LspAsk::Hover),
+            Action::Definition => self.ask_lsp(LspAsk::Definition),
+            Action::References => self.ask_lsp(LspAsk::References),
+            Action::NextDiagnostic { forward } => self.next_diagnostic(forward),
             Action::Center => {
                 self.top = line.saturating_sub(self.view_height / 2);
             }
@@ -1239,6 +1294,189 @@ impl Editor {
             self.doc.begin_step(self.cursor);
         } else {
             self.clamp();
+        }
+    }
+
+    /// A typed character in Insert mode, with auto pairs (the part of `insert_key` for `Char`).
+    fn insert_key_plain(&mut self, c: char) {
+        let rope = &self.doc.rope;
+        let next = rope.get_char(self.cursor);
+        let prev = self.cursor.checked_sub(1).and_then(|i| rope.get_char(i));
+        if self.auto_pairs && next == Some(c) && closes(c) {
+            self.cursor += 1;
+        } else if let Some(close) = self.pair_for(c, prev, next) {
+            self.doc
+                .edit(self.cursor, self.cursor, &format!("{c}{close}"));
+            self.cursor += 1;
+        } else {
+            self.doc
+                .edit(self.cursor, self.cursor, c.encode_utf8(&mut [0; 4]));
+            self.cursor += 1;
+        }
+    }
+
+    /// `K`, `gd`, `gr`: asks the language server about the cursor's place.
+    fn ask_lsp(&mut self, make: fn(lsp::Pos) -> LspAsk) {
+        if !self.lsp.active {
+            self.message = Some("No language server for this file (see Space s k: LSP)".into());
+            return;
+        }
+        let pos = lsp::from_char(&self.doc.rope, self.cursor, self.lsp.encoding);
+        self.requests.push(Request::Lsp(make(pos)));
+    }
+
+    /// While typing a word (or after `.` / `::` / `->`): asks for completions.
+    fn ask_completion(&mut self) {
+        let pos = lsp::from_char(&self.doc.rope, self.cursor, self.lsp.encoding);
+        self.requests
+            .push(Request::Lsp(LspAsk::Completion(pos, self.doc.version())));
+        if let Some(menu) = &mut self.lsp.completion {
+            Self::filter_menu(menu, &self.doc.rope, self.cursor);
+        }
+    }
+
+    /// The server's completions; shown filtered by the word typed so far.
+    pub fn show_completion(&mut self, items: Vec<lsp::Completion>) {
+        if self.mode != Mode::Insert || items.is_empty() {
+            self.lsp.completion = None;
+            return;
+        }
+        let start = word_start(&self.doc.rope, self.cursor);
+        let mut menu = CompletionMenu {
+            items,
+            shown: Vec::new(),
+            selected: 0,
+            start,
+        };
+        Self::filter_menu(&mut menu, &self.doc.rope, self.cursor);
+        self.lsp.completion = (!menu.shown.is_empty()).then_some(menu);
+    }
+
+    fn filter_menu(menu: &mut CompletionMenu, rope: &ropey::Rope, cursor: usize) {
+        menu.start = word_start(rope, cursor);
+        let typed: String = rope.slice(menu.start..cursor).chars().collect();
+        let mut scored: Vec<(i64, usize)> = menu
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| Some((crate::fuzzy::score(&typed, &item.label)?.0, i)))
+            .collect();
+        scored.sort_by_key(|(s, _)| -s);
+        menu.shown = scored.into_iter().take(50).map(|(_, i)| i).collect();
+        menu.selected = menu.selected.min(menu.shown.len().saturating_sub(1));
+    }
+
+    /// A key while the completion menu is open; `false` lets Insert mode have it.
+    fn completion_key(&mut self, key: Key) -> bool {
+        let Some(menu) = &mut self.lsp.completion else {
+            return false;
+        };
+        let len = menu.shown.len().max(1);
+        match key {
+            Key::Down | Key::Ctrl('n' | 'j') => menu.selected = (menu.selected + 1) % len,
+            Key::Up | Key::Ctrl('p' | 'k') => menu.selected = (menu.selected + len - 1) % len,
+            Key::Tab | Key::Enter => {
+                let menu = self.lsp.completion.take().expect("open");
+                if let Some(&i) = menu.shown.get(menu.selected) {
+                    let insert = menu.items[i].insert.clone();
+                    self.doc.edit(menu.start, self.cursor, &insert);
+                    self.cursor = menu.start + insert.chars().count();
+                }
+            }
+            Key::Esc => {
+                self.lsp.completion = None;
+                return false;
+            }
+            Key::Backspace => {
+                self.insert_key(key);
+                if self.cursor <= menu_start(&self.lsp.completion) {
+                    self.lsp.completion = None;
+                } else {
+                    self.ask_completion();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// `K`'s answer.
+    pub fn show_hover(&mut self, text: String) {
+        if text.trim().is_empty() {
+            self.message = Some("No information here".into());
+        } else {
+            self.lsp.hover = Some(text);
+        }
+    }
+
+    /// Moves to a place the server named in this document (`gd` in the same file).
+    pub fn jump_to(&mut self, pos: lsp::Pos) {
+        self.cursor = lsp::to_char(&self.doc.rope, pos, self.lsp.encoding);
+        if self.mode != Mode::Normal {
+            self.mode = Mode::Normal;
+        }
+        self.clamp();
+        let line = self.line();
+        if line < self.top || line >= self.top + self.view_height {
+            self.top = line.saturating_sub(self.view_height / 2);
+        }
+    }
+
+    /// `gr`'s answer: a picker of the places (file, line, text of that line).
+    pub fn show_references(&mut self, places: Vec<(PathBuf, usize, String)>) {
+        if places.is_empty() {
+            self.message = Some("No references found".into());
+            return;
+        }
+        let items = places
+            .into_iter()
+            .map(|(path, line, text)| Item {
+                text: text.trim().to_string(),
+                detail: format!("{}:{}", self.display_path(&path), line + 1),
+                pick: Pick::File {
+                    path,
+                    line: Some(line),
+                },
+            })
+            .collect();
+        self.picker = Some(Picker::new(Kind::Locations, "References", items));
+    }
+
+    /// `]d` / `[d`: the next / previous diagnostic (wrapping), its message shown.
+    fn next_diagnostic(&mut self, forward: bool) {
+        let rope = &self.doc.rope;
+        let mut starts: Vec<(usize, &str)> = self
+            .lsp
+            .diagnostics
+            .iter()
+            .map(|d| {
+                (
+                    lsp::to_char(rope, d.start, self.lsp.encoding),
+                    d.message.as_str(),
+                )
+            })
+            .collect();
+        starts.sort_by_key(|(at, _)| *at);
+        let next = if forward {
+            starts
+                .iter()
+                .find(|(at, _)| *at > self.cursor)
+                .or(starts.first())
+        } else {
+            starts
+                .iter()
+                .rev()
+                .find(|(at, _)| *at < self.cursor)
+                .or(starts.last())
+        };
+        match next {
+            Some(&(at, message)) => {
+                let message = message.lines().next().unwrap_or("").to_string();
+                self.cursor = at;
+                self.clamp();
+                self.message = Some(message);
+            }
+            None => self.message = Some("No diagnostics".into()),
         }
     }
 
@@ -1759,7 +1997,12 @@ impl Editor {
                 }
                 self.clamp();
             }
+            Key::Char(c) if self.lsp.active && completes(c) => {
+                self.insert_key_plain(c);
+                self.ask_completion();
+            }
             Key::Char(c) => {
+                self.lsp.completion = None;
                 let next = rope.get_char(self.cursor);
                 let prev = self.cursor.checked_sub(1).and_then(|i| rope.get_char(i));
                 if self.auto_pairs && next == Some(c) && closes(c) {
@@ -2046,6 +2289,28 @@ impl Editor {
     }
 }
 
+/// Characters that keep (or start) a completion: word characters and `.` `:` `>`.
+fn completes(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '>')
+}
+
+/// Where the word before `cursor` starts.
+fn word_start(rope: &ropey::Rope, cursor: usize) -> usize {
+    let mut start = cursor;
+    while start > 0
+        && rope
+            .get_char(start - 1)
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        start -= 1;
+    }
+    start
+}
+
+fn menu_start(menu: &Option<CompletionMenu>) -> usize {
+    menu.as_ref().map_or(0, |m| m.start)
+}
+
 /// A closing bracket or a quote (typed where it already is, the cursor steps over it).
 fn closes(c: char) -> bool {
     matches!(c, ')' | ']' | '}' | '"' | '\'' | '`')
@@ -2313,6 +2578,19 @@ fn parse_action(keys: &[Key]) -> Parsed {
         Key::Char('z') => match keys.get(1) {
             None => Parsed::Incomplete,
             Some(Key::Char('z')) => act(Action::Center),
+            Some(_) => Parsed::Invalid,
+        },
+        Key::Char('K') => act(Action::Hover),
+        // `g` alone is a motion prefix (gg); gd / gr come here when it is not a motion.
+        Key::Char('g') => match keys.get(1) {
+            None => Parsed::Incomplete,
+            Some(Key::Char('d')) => act(Action::Definition),
+            Some(Key::Char('r')) => act(Action::References),
+            Some(_) => Parsed::Invalid,
+        },
+        Key::Char(c @ (']' | '[')) => match keys.get(1) {
+            None => Parsed::Incomplete,
+            Some(Key::Char('d')) => act(Action::NextDiagnostic { forward: c == ']' }),
             Some(_) => Parsed::Invalid,
         },
         _ => Parsed::Invalid,
@@ -2933,5 +3211,104 @@ mod tests {
         e.handle_key(Key::Char('x'));
         e.formatted(old, Ok("zzz\n".into()));
         assert_ne!(e.doc.rope.to_string(), "zzz\n");
+    }
+
+    #[test]
+    fn lsp_keys_ask_the_server_with_its_positions() {
+        let mut e = ed("aé|b\n");
+        e.handle_key(Key::Char('K'));
+        assert!(
+            e.message
+                .as_deref()
+                .unwrap()
+                .starts_with("No language server")
+        );
+        e.lsp.active = true;
+        e.lsp.encoding = lsp::Encoding::Utf8;
+        for k in keys("Kgdgr") {
+            e.handle_key(k);
+        }
+        let at = lsp::Pos {
+            line: 0,
+            character: 3,
+        }; // é is two bytes
+        assert_eq!(
+            e.requests,
+            [
+                Request::Lsp(LspAsk::Hover(at)),
+                Request::Lsp(LspAsk::Definition(at)),
+                Request::Lsp(LspAsk::References(at))
+            ]
+        );
+        // The hover box shows until the next key.
+        e.show_hover("**u8**".into());
+        assert!(e.lsp.hover.is_some());
+        e.handle_key(Key::Esc);
+        assert!(e.lsp.hover.is_none());
+    }
+
+    #[test]
+    fn completion_menu_filters_and_accepts() {
+        let mut e = ed("|\n");
+        e.lsp.active = true;
+        for k in keys("ipu") {
+            e.handle_key(k);
+        }
+        assert!(matches!(
+            e.requests.last(),
+            Some(Request::Lsp(LspAsk::Completion(..)))
+        ));
+        let item = |label: &str, insert: &str| lsp::Completion {
+            label: label.into(),
+            insert: insert.into(),
+            detail: String::new(),
+            kind: "fn",
+        };
+        e.show_completion(vec![item("pop", "pop()"), item("push", "push(value)")]);
+        let menu = e.lsp.completion.as_ref().unwrap();
+        assert_eq!(menu.shown.len(), 1, "only push fits \"pu\"");
+        e.handle_key(Key::Tab);
+        assert_eq!(e.doc.rope.to_string(), "push(value)\n");
+        assert!(e.lsp.completion.is_none() && e.mode == Mode::Insert);
+    }
+
+    #[test]
+    fn diagnostics_are_walked_with_brackets() {
+        let mut e = ed("|one\ntwo\nthree\n");
+        let diag = |line, message: &str| lsp::Diagnostic {
+            start: lsp::Pos { line, character: 1 },
+            end: lsp::Pos { line, character: 2 },
+            severity: lsp::Severity::Error,
+            message: message.into(),
+        };
+        e.lsp.diagnostics = vec![diag(2, "third"), diag(1, "second")];
+        for k in keys("]d") {
+            e.handle_key(k);
+        }
+        assert_eq!((e.line(), e.message.as_deref()), (1, Some("second")));
+        for k in keys("]d]d") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.line(), 1, "wraps around");
+        for k in keys("[d") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.line(), 2);
+    }
+
+    #[test]
+    fn references_open_a_picker() {
+        let mut e = ed("|a\n");
+        e.show_references(vec![(
+            PathBuf::from("/p/src/a.rs"),
+            4,
+            "  let x = 1;".into(),
+        )]);
+        let p = e.picker.as_ref().unwrap();
+        assert_eq!(
+            (p.kind, p.items[0].text.as_str()),
+            (Kind::Locations, "let x = 1;")
+        );
+        assert!(p.items[0].detail.ends_with("a.rs:5"));
     }
 }

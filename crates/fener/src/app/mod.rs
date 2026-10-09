@@ -384,6 +384,7 @@ impl App {
         match event {
             AppEvent::Tick => self.check_folder(false),
             AppEvent::Redraw => self.dirty = true,
+            AppEvent::Lsp { server, event } => self.on_lsp(server, *event),
             AppEvent::CodeFormatted {
                 id,
                 version,

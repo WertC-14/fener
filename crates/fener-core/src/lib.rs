@@ -11,6 +11,7 @@ pub mod files;
 pub mod format;
 pub mod fuzzy;
 pub mod highlight;
+pub mod lsp;
 pub mod picker;
 pub mod run;
 pub mod state;
@@ -20,5 +21,5 @@ pub mod tree;
 
 pub use command::Command;
 pub use document::{Document, Edit};
-pub use editor::{Editor, Key, Mode, Request};
+pub use editor::{CompletionMenu, Editor, Key, LspAsk, LspState, Mode, Request};
 pub use state::State;

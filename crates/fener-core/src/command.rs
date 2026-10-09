@@ -225,6 +225,13 @@ pub const VIM_KEYS: &[(&str, &str)] = &[
     ("H L", "Previous / next tab (Shift+H, Shift+L)"),
     ("Alt+J Alt+K", "Move the line (or selection) down / up"),
     ("gcc gc", "Comment a line / a motion or selection in or out"),
+    ("K", "LSP: what is under the cursor (hover)"),
+    ("gd gr", "LSP: go to the definition / list the references"),
+    ("]d [d", "LSP: next / previous error or warning"),
+    (
+        "Tab Enter",
+        "LSP completion menu: accept (arrows, Ctrl+N/P choose)",
+    ),
     ("Ctrl+F", "Find in this file"),
     ("F5", "Save, build and run in the terminal (Space Enter)"),
     ("␣ 1…9", "Go to tab 1…9 (1: the files)"),

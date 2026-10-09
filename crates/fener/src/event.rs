@@ -22,6 +22,11 @@ pub enum AppEvent {
         version: u64,
         result: Result<String, String>,
     },
+    /// A language server said something (ADR 0016); `server` is the code tabs' server id.
+    Lsp {
+        server: u64,
+        event: Box<fener_core::lsp::Event>,
+    },
     /// Something drawn changed off the main thread (tree-sitter colors are ready).
     Redraw,
     /// Every few seconds: the open folder's modification time is checked (see `watch.rs`).
