@@ -4,7 +4,8 @@ use std::io::{self, stdout};
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
-    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -28,12 +29,23 @@ impl Tui {
         // otherwise the shell receives mouse escape codes after a crash.
         let ratatui_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(stdout(), DisableMouseCapture, DisableFocusChange);
+            let _ = execute!(
+                stdout(),
+                DisableMouseCapture,
+                DisableFocusChange,
+                DisableBracketedPaste
+            );
             ratatui_hook(info);
         }));
 
         // Focus reports: coming back to the window (from a browser download) refreshes the folder.
-        execute!(stdout(), EnableMouseCapture, EnableFocusChange)?;
+        // Bracketed paste: files dropped on the window arrive as one paste (ADR 0014).
+        execute!(
+            stdout(),
+            EnableMouseCapture,
+            EnableFocusChange,
+            EnableBracketedPaste
+        )?;
         Ok(Self { terminal })
     }
 
@@ -56,7 +68,12 @@ impl Tui {
 
     /// Gives the terminal back (normal screen, cooked mode) so another program can use it.
     pub fn suspend(&mut self) -> io::Result<()> {
-        execute!(stdout(), DisableMouseCapture, DisableFocusChange)?;
+        execute!(
+            stdout(),
+            DisableMouseCapture,
+            DisableFocusChange,
+            DisableBracketedPaste
+        )?;
         ratatui::try_restore()
     }
 
@@ -73,7 +90,8 @@ impl Tui {
             EnterAlternateScreen,
             Clear(ClearType::All),
             EnableMouseCapture,
-            EnableFocusChange
+            EnableFocusChange,
+            EnableBracketedPaste
         )?;
         self.terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         Ok(())
@@ -82,7 +100,12 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        let _ = execute!(stdout(), DisableMouseCapture, DisableFocusChange);
+        let _ = execute!(
+            stdout(),
+            DisableMouseCapture,
+            DisableFocusChange,
+            DisableBracketedPaste
+        );
         ratatui::restore();
     }
 }
