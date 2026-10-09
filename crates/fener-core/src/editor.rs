@@ -25,6 +25,7 @@ use crate::tree::{self, Tree};
 pub enum Key {
     Char(char),
     Ctrl(char),
+    Alt(char),
     Esc,
     Enter,
     Backspace,
@@ -113,6 +114,8 @@ enum Operator {
     Yank,
     Indent,
     Outdent,
+    /// `gc`: comment lines out, or back in.
+    Comment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +189,12 @@ const SCROLL_OFF: usize = 4;
 pub enum Request {
     /// Show tab `n` (0-based; `Space 1` is 0, the file manager).
     SwitchTab(usize),
+    /// Shift+H / Shift+L: the tab before / after this one.
+    CycleTab(isize),
+    /// Space g g: lazygit in the project, full screen.
+    Lazygit,
+    /// Space q s: open the files of the last session again.
+    RestoreSession,
     /// List the files under `root` for the Files picker.
     ListFiles,
     /// Search the files under `root` for this text, for the Grep picker.
@@ -258,6 +267,8 @@ pub struct Editor {
     pub reader_top: usize,
     /// Spaces per indent level (`[editor] indent`; LazyVim: `shiftwidth = 2`).
     pub indent: usize,
+    /// Brackets and quotes close themselves (`[editor] auto-pairs`; LazyVim: mini.pairs).
+    pub auto_pairs: bool,
     /// Keys from the config file's `[keys]`, checked before the built-in ones.
     pub keymap: HashMap<Key, Command>,
     /// The config file (`[run]` commands, options for new tabs).
@@ -304,6 +315,7 @@ impl Editor {
             reader: false,
             reader_top: 0,
             indent: 2,
+            auto_pairs: true,
             keymap: HashMap::new(),
             config: Config::default(),
         }
@@ -423,6 +435,9 @@ impl Editor {
             match key {
                 Key::Ctrl('z') => return self.undo_redo(true),
                 Key::Ctrl('y') => return self.undo_redo(false),
+                // Alt+J / Alt+K: move the line (or the selected lines) down / up.
+                Key::Alt('j') => return self.move_lines(true),
+                Key::Alt('k') => return self.move_lines(false),
                 Key::Ctrl('e') if self.context() == When::Markdown => {
                     if self.mode != Mode::Normal {
                         self.handle_key(Key::Esc);
@@ -462,6 +477,9 @@ impl Editor {
                     return;
                 }
                 Key::Ctrl('b') => return self.run_command(Command::Explorer),
+                // LazyVim: Shift+H / Shift+L go to the previous / next buffer (here: tab).
+                Key::Char('H') => return self.requests.push(Request::CycleTab(-1)),
+                Key::Char('L') => return self.requests.push(Request::CycleTab(1)),
                 Key::Ctrl('f') => return self.run_command(Command::SearchLines),
                 Key::F(5) => return self.run_command(Command::Run),
                 Key::F(4) | Key::Ctrl('/' | '_' | '7') => {
@@ -755,6 +773,9 @@ impl Editor {
                     self.cursor = from;
                 }
                 self.enter_insert();
+            }
+            Operator::Comment => {
+                self.toggle_comment(first_line, last_line);
             }
             Operator::Indent | Operator::Outdent => {
                 for line in first_line..=last_line {
@@ -1125,6 +1146,8 @@ impl Editor {
             Command::Run => self.run_file(crate::run::Goal::Run),
             Command::Build => self.run_file(crate::run::Goal::Build),
             Command::Terminal => self.requests.push(Request::ToggleTerminal),
+            Command::Lazygit => self.requests.push(Request::Lazygit),
+            Command::RestoreSession => self.requests.push(Request::RestoreSession),
             Command::Dashboard => self.dashboard = Some(0),
             Command::Save => self.save(None),
             Command::Quit => self.ex("qa"),
@@ -1211,6 +1234,142 @@ impl Editor {
         }
     }
 
+    /// The closer to put after `c` (auto pairs), if any. Quotes pair only between words, and
+    /// `'` not at all in Rust, where it starts lifetimes (`&'a`).
+    fn pair_for(&self, c: char, prev: Option<char>, next: Option<char>) -> Option<char> {
+        if !self.auto_pairs {
+            return None;
+        }
+        // Before a word character a pair would wrap the word wrongly: just the character.
+        if next.is_some_and(|n| n.is_alphanumeric() || n == '_') {
+            return None;
+        }
+        match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' | '`' | '\'' => {
+                let rust = self
+                    .doc
+                    .path()
+                    .and_then(|p| p.extension())
+                    .is_some_and(|e| e == "rs");
+                let after_word = prev.is_some_and(|p| p.is_alphanumeric() || p == '_' || p == c);
+                (!after_word && !(c == '\'' && rust)).then_some(c)
+            }
+            _ => None,
+        }
+    }
+
+    /// `gcc` / `gc{motion}` / Visual `gc`: comments the lines out with the language's line
+    /// comment, or takes it away when they all have one.
+    fn toggle_comment(&mut self, first: usize, last: usize) {
+        let Some(mark) = self.comment_mark() else {
+            self.message = Some("No line comment known for this kind of file".into());
+            return;
+        };
+        let rope = &self.doc.rope;
+        let lines: Vec<String> = (first..=last).map(|l| text::line_text(rope, l)).collect();
+        let used: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+        let all_commented =
+            !used.is_empty() && used.iter().all(|l| l.trim_start().starts_with(mark));
+        // New marks go at the smallest indent, so the block stays aligned.
+        let indent = used
+            .iter()
+            .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').count())
+            .min()
+            .unwrap_or(0);
+        for (i, content) in lines.iter().enumerate() {
+            if content.trim().is_empty() {
+                continue;
+            }
+            let start = text::line_start(&self.doc.rope, first + i);
+            if all_commented {
+                let lead = content
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .count();
+                let after = &content[content.char_indices().nth(lead).map_or(0, |(b, _)| b)..];
+                let mut len = mark.chars().count();
+                if after[mark.len()..].starts_with(' ') {
+                    len += 1;
+                }
+                self.doc.edit(start + lead, start + lead + len, "");
+            } else {
+                self.doc
+                    .edit(start + indent, start + indent, &format!("{mark} "));
+            }
+        }
+        self.cursor = text::first_non_blank(&self.doc.rope, first);
+    }
+
+    /// The line comment of the open file's language.
+    fn comment_mark(&self) -> Option<&'static str> {
+        match self.doc.path().map(Lang::from_path) {
+            Some(Lang::CLike) => Some("//"),
+            Some(Lang::Hash) => Some("#"),
+            Some(Lang::Dash) => Some("--"),
+            _ => None,
+        }
+    }
+
+    /// Alt+J / Alt+K: swaps the line under the cursor (Visual: the selected lines) with the one
+    /// below / above. One undo step; Visual mode keeps its selection on the moved lines.
+    fn move_lines(&mut self, down: bool) {
+        let rope = &self.doc.rope;
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        let (first, last) = if visual {
+            let (a, b) = (self.anchor.min(self.cursor), self.anchor.max(self.cursor));
+            (text::line_of(rope, a), text::line_of(rope, b))
+        } else {
+            let l = self.line();
+            (l, l)
+        };
+        let lines = text::line_count(rope);
+        if (down && last + 1 >= lines) || (!down && first == 0) {
+            return;
+        }
+        let (top, bottom) = if down {
+            (first, last + 1)
+        } else {
+            (first - 1, last)
+        };
+        let mut block: Vec<String> = (top..=bottom).map(|l| text::line_text(rope, l)).collect();
+        if down {
+            block.rotate_right(1);
+        } else {
+            block.rotate_left(1);
+        }
+        let from = text::line_start(rope, top);
+        let to = text::line_start(rope, bottom) + text::line_len(rope, bottom);
+        let (col, anchor_col) = (self.col(), text::col_of(rope, self.anchor));
+        let anchor_line = text::line_of(rope, self.anchor);
+        let insert = self.mode == Mode::Insert;
+        if !insert {
+            self.doc.begin_step(self.cursor);
+        }
+        self.doc.edit(from, to, &block.join("\n"));
+        let shift = |l: usize| if down { l + 1 } else { l - 1 };
+        let rope = &self.doc.rope;
+        self.cursor = text::at_col(
+            rope,
+            shift(self.line_of_cursor_before(first, last)),
+            col,
+            insert,
+        );
+        if visual {
+            self.anchor = text::at_col(rope, shift(anchor_line), anchor_col, false);
+        }
+        if !insert {
+            self.doc.end_step(self.cursor);
+        }
+    }
+
+    /// The cursor's line before a move of lines `first..=last` (it is one of them).
+    fn line_of_cursor_before(&self, first: usize, last: usize) -> usize {
+        self.line().clamp(first, last)
+    }
+
     /// F5 / `Space Enter` / `Space b`: saves, then asks the app to type the file's run (or
     /// build) command in the terminal. The config file's `[run]` / `[build]` comes first.
     fn run_file(&mut self, goal: crate::run::Goal) {
@@ -1245,6 +1404,7 @@ impl Editor {
             LineNumbers::Off => (false, false),
         };
         self.indent = config.editor.indent.clamp(1, 16);
+        self.auto_pairs = config.editor.auto_pairs;
         self.keymap = config.keymap();
         self.config = config.clone();
     }
@@ -1541,9 +1701,20 @@ impl Editor {
                 self.clamp();
             }
             Key::Char(c) => {
-                self.doc
-                    .edit(self.cursor, self.cursor, c.encode_utf8(&mut [0; 4]));
-                self.cursor += 1;
+                let next = rope.get_char(self.cursor);
+                let prev = self.cursor.checked_sub(1).and_then(|i| rope.get_char(i));
+                if self.auto_pairs && next == Some(c) && closes(c) {
+                    // Typing the closer that is already there steps over it.
+                    self.cursor += 1;
+                } else if let Some(close) = self.pair_for(c, prev, next) {
+                    self.doc
+                        .edit(self.cursor, self.cursor, &format!("{c}{close}"));
+                    self.cursor += 1;
+                } else {
+                    self.doc
+                        .edit(self.cursor, self.cursor, c.encode_utf8(&mut [0; 4]));
+                    self.cursor += 1;
+                }
             }
             Key::Tab => {
                 self.doc
@@ -1558,12 +1729,27 @@ impl Editor {
                     .count()
                     .min(self.cursor - text::line_start(rope, line));
                 let indent: String = indent.chars().take(keep).collect();
-                self.doc
-                    .edit(self.cursor, self.cursor, &format!("\n{indent}"));
-                self.cursor += 1 + indent.chars().count();
+                let prev = self.cursor.checked_sub(1).and_then(|i| rope.get_char(i));
+                let next = rope.get_char(self.cursor);
+                if self.auto_pairs && is_pair(prev, next) {
+                    // Enter inside `{}`: the closer goes to its own line, the cursor in between.
+                    let inner = format!("{indent}{}", " ".repeat(self.indent));
+                    self.doc
+                        .edit(self.cursor, self.cursor, &format!("\n{inner}\n{indent}"));
+                    self.cursor += 1 + inner.chars().count();
+                } else {
+                    self.doc
+                        .edit(self.cursor, self.cursor, &format!("\n{indent}"));
+                    self.cursor += 1 + indent.chars().count();
+                }
             }
             Key::Backspace if self.cursor > 0 => {
-                self.doc.edit(self.cursor - 1, self.cursor, "");
+                let prev = rope.get_char(self.cursor - 1);
+                let next = rope.get_char(self.cursor);
+                // Inside an empty pair, both go.
+                let both = self.auto_pairs && is_pair(prev, next);
+                self.doc
+                    .edit(self.cursor - 1, self.cursor + usize::from(both), "");
                 self.cursor -= 1;
             }
             Key::Delete if self.cursor < rope.len_chars() => {
@@ -1607,13 +1793,16 @@ impl Editor {
         let Some(&first) = rest.first() else {
             return;
         };
-        let op = match first {
-            Key::Char('d' | 'x') | Key::Delete => Some(Operator::Delete),
-            Key::Char('y') => Some(Operator::Yank),
-            Key::Char('c' | 's') => Some(Operator::Change),
-            Key::Char('>') => Some(Operator::Indent),
-            Key::Char('<') => Some(Operator::Outdent),
-            _ => None,
+        let op = match (first, rest.get(1)) {
+            (Key::Char('g'), Some(Key::Char('c'))) => Some(Operator::Comment),
+            _ => match first {
+                Key::Char('d' | 'x') | Key::Delete => Some(Operator::Delete),
+                Key::Char('y') => Some(Operator::Yank),
+                Key::Char('c' | 's') => Some(Operator::Change),
+                Key::Char('>') => Some(Operator::Indent),
+                Key::Char('<') => Some(Operator::Outdent),
+                _ => None,
+            },
         };
         if let Some(op) = op {
             self.pending.clear();
@@ -1798,6 +1987,24 @@ impl Editor {
     }
 }
 
+/// A closing bracket or a quote (typed where it already is, the cursor steps over it).
+fn closes(c: char) -> bool {
+    matches!(c, ')' | ']' | '}' | '"' | '\'' | '`')
+}
+
+/// The cursor sits inside an empty pair: `(|)`, `"|"`.
+fn is_pair(prev: Option<char>, next: Option<char>) -> bool {
+    matches!(
+        (prev, next),
+        (Some('('), Some(')'))
+            | (Some('['), Some(']'))
+            | (Some('{'), Some('}'))
+            | (Some('"'), Some('"'))
+            | (Some('\''), Some('\''))
+            | (Some('`'), Some('`'))
+    )
+}
+
 const NOT_SAVED: &str = "No write since last change (:w saves, :e! FILE drops the changes)";
 
 /// Spaces and tabs at the start of `line`.
@@ -1849,8 +2056,14 @@ fn parse(keys: &[Key], context: When) -> Parsed {
     if first == Key::Char(' ') {
         return parse_leader(&rest[1..], context);
     }
-    if let Some(op) = operator_of(first) {
-        let (count2, rest) = parse_count(&rest[1..]);
+    // `gc` is the one operator of two keys; its line form is `gcc`.
+    let operator = match rest {
+        [Key::Char('g'), Key::Char('c'), ..] => Some((Operator::Comment, 2)),
+        _ => operator_of(first).map(|op| (op, 1)),
+    };
+    if let Some((op, len)) = operator {
+        let first = rest[len - 1];
+        let (count2, rest) = parse_count(&rest[len..]);
         let count = match (count, count2) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(1) * b.unwrap_or(1)),
@@ -2251,6 +2464,7 @@ mod tests {
                 ('b', "Build / Check (no run)"),
                 ('e', "Explorer (folder tree; Ctrl+B)"),
                 ('f', "+file/find"),
+                ('g', "+git"),
                 ('o', "Find in File (Ctrl+F)"),
                 ('q', "+quit/session"),
                 ('s', "+search"),
@@ -2528,5 +2742,121 @@ mod tests {
         e.handle_key(Key::Ctrl('e'));
         assert!(e.reader && e.mode == Mode::Normal);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An editor on a scratch file with this name and text (the extension picks the language).
+    fn ed_file(name: &str, text: &str) -> (Editor, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fener-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, text).unwrap();
+        (Editor::new(Document::open(&file).unwrap()), dir)
+    }
+
+    #[test]
+    fn gcc_and_gc_comment_in_and_out() {
+        let (mut e, dir) = ed_file("a.rs", "fn a() {\n    x();\n    y();\n}\n");
+        for k in keys("jgcc") {
+            e.handle_key(k);
+        }
+        assert_eq!(
+            e.doc.rope.to_string(),
+            "fn a() {\n    // x();\n    y();\n}\n"
+        );
+        // gcj: this line and the next; one is commented already, so both get one.
+        for k in keys("gcj") {
+            e.handle_key(k);
+        }
+        assert_eq!(
+            e.doc.rope.to_string(),
+            "fn a() {\n    // // x();\n    // y();\n}\n"
+        );
+        e.handle_key(Key::Ctrl('z'));
+        // Visual gc on both lines: not all commented → each gets a mark; again → they go.
+        for k in keys("Vjgc") {
+            e.handle_key(k);
+        }
+        assert_eq!(
+            e.doc.rope.to_string(),
+            "fn a() {\n    // // x();\n    // y();\n}\n"
+        );
+        for k in keys("Vjgc") {
+            e.handle_key(k);
+        }
+        assert_eq!(
+            e.doc.rope.to_string(),
+            "fn a() {\n    // x();\n    y();\n}\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn alt_j_and_alt_k_move_lines() {
+        let mut e = ed("|one\ntwo\nthree\n");
+        e.handle_key(Key::Alt('j'));
+        assert_eq!(
+            (e.doc.rope.to_string().as_str(), e.line()),
+            ("two\none\nthree\n", 1)
+        );
+        e.handle_key(Key::Alt('k'));
+        assert_eq!(e.doc.rope.to_string(), "one\ntwo\nthree\n");
+        // Visual: two lines move together and stay selected.
+        for k in keys("Vj") {
+            e.handle_key(k);
+        }
+        e.handle_key(Key::Alt('j'));
+        assert_eq!(e.doc.rope.to_string(), "three\none\ntwo\n");
+        assert_eq!(e.mode, Mode::VisualLine);
+        e.handle_key(Key::Ctrl('z'));
+        assert_eq!(e.doc.rope.to_string(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn brackets_and_quotes_close_themselves() {
+        let (mut e, dir) = ed_file("p.py", "\n");
+        for k in keys("ifoo(\"a") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.doc.rope.to_string(), "foo(\"a\")\n");
+        // Typing the closers steps over them.
+        for k in keys("\")") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.doc.rope.to_string(), "foo(\"a\")\n");
+        // Backspace in an empty pair takes both; Enter inside {} opens it.
+        for k in keys("[<BS>{<CR>") {
+            e.handle_key(k);
+        }
+        assert_eq!(e.doc.rope.to_string(), "foo(\"a\"){\n  \n}\n");
+        // Inside a word, no pair: it's.
+        for k in keys("<Esc>oit's") {
+            e.handle_key(k);
+        }
+        assert!(e.doc.rope.to_string().contains("it's\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        // Rust: no pair for ' (lifetimes).
+        let (mut r, dir) = ed_file("l.rs", "\n");
+        for k in keys("i&'a") {
+            r.handle_key(k);
+        }
+        assert_eq!(r.doc.rope.to_string(), "&'a\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shift_h_l_and_space_g_g_and_space_q_s_ask_the_app() {
+        let mut e = ed("|a");
+        for k in keys("HL<Space>gg<Space>qs") {
+            e.handle_key(k);
+        }
+        assert_eq!(
+            e.requests,
+            [
+                Request::CycleTab(-1),
+                Request::CycleTab(1),
+                Request::Lazygit,
+                Request::RestoreSession
+            ]
+        );
     }
 }

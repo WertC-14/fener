@@ -11,6 +11,8 @@ pub enum Command {
     Build,
     Headings,
     Terminal,
+    Lazygit,
+    RestoreSession,
     RecentFiles,
     FindText,
     NewFile,
@@ -36,6 +38,8 @@ impl Command {
             Self::Build => "build",
             Self::Headings => "headings",
             Self::Terminal => "terminal",
+            Self::Lazygit => "lazygit",
+            Self::RestoreSession => "restore-session",
             Self::RecentFiles => "recent-files",
             Self::FindText => "find-text",
             Self::NewFile => "new-file",
@@ -144,6 +148,12 @@ pub const COMMANDS: &[Binding] = &[
     ),
     bind(Command::ClearSearch, "ur", "Clear Search Highlight"),
     bind(Command::Quit, "qq", "Quit All"),
+    bind(
+        Command::RestoreSession,
+        "qs",
+        "Restore Session (last open files)",
+    ),
+    bind(Command::Lazygit, "gg", "Lazygit"),
     bind(Command::Dashboard, "", "Start Screen (:Dashboard)"),
 ];
 
@@ -152,6 +162,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("f", "+file/find"),
     ("s", "+search"),
     ("u", "+ui"),
+    ("g", "+git"),
     ("q", "+quit/session"),
 ];
 
@@ -207,6 +218,9 @@ pub const VIM_KEYS: &[(&str, &str)] = &[
     (":e FILE", "Open a file (:e! drops changes)"),
     ("Tab", "Folder tree <-> text (Ctrl+H, Ctrl+L too)"),
     ("Ctrl+B", "Show / hide the folder tree"),
+    ("H L", "Previous / next tab (Shift+H, Shift+L)"),
+    ("Alt+J Alt+K", "Move the line (or selection) down / up"),
+    ("gcc gc", "Comment a line / a motion or selection in or out"),
     ("Ctrl+F", "Find in this file"),
     ("F5", "Save, build and run in the terminal (Space Enter)"),
     ("␣ 1…9", "Go to tab 1…9 (1: the files)"),

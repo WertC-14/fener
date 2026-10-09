@@ -104,6 +104,14 @@ fn main() -> io::Result<()> {
     (app.code.config, app.code.config_error) = fener_core::config::Config::load();
     if let Some(file) = &file {
         app.open_code_tab(file);
+    } else {
+        let last = fener_core::state::load_session().len();
+        if last > 0 {
+            app.message = Some(liman_core::i18n::trf(
+                "Last time {} files were open: Alt+S opens them again",
+                &[&last],
+            ));
+        }
     }
     let mut last_draw: Option<Instant> = None;
     let mut cursor_bar: Option<bool> = None;

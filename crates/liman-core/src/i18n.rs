@@ -110,6 +110,11 @@ pub fn turkish(en: &str) -> Option<&'static str> {
         }
         "Copied {} files: Ctrl+V in the other app" => "{} dosya kopyalandı: öbür uygulamada Ctrl+V",
         "Cannot copy as file: {} is missing" => "Dosya olarak kopyalanamadı: {} kurulu değil",
+        "Reopen the files of the last session" => "Son oturumun dosyalarını yeniden aç",
+        "No earlier session to restore" => "Geri yüklenecek bir oturum yok",
+        "Last time {} files were open: Alt+S opens them again" => {
+            "Geçen sefer {} dosya açıktı: Alt+S yeniden açar"
+        }
         "Open a folder to drop files into" => "Dosya bırakmak için bir klasör aç",
         "{} items" => "{} öğe",
         "{}+ items" => "{}+ öğe",

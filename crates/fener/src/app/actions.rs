@@ -22,6 +22,7 @@ pub enum Action {
     CopyPath,
     DragOut,
     CopyAsFiles,
+    RestoreSession,
     Bookmark,
     Trash,
     DeleteForGood,
@@ -61,7 +62,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 47] = [
+    pub const ALL: [Action; 48] = [
         Self::GitPanel,
         Self::GitStage,
         Self::GitUnstage,
@@ -81,6 +82,7 @@ impl Action {
         Self::CopyPath,
         Self::DragOut,
         Self::CopyAsFiles,
+        Self::RestoreSession,
         Self::Bookmark,
         Self::Trash,
         Self::DeleteForGood,
@@ -159,6 +161,7 @@ impl Action {
             Self::CopyPath => "Copy path to clipboard",
             Self::DragOut => "Drag to another app",
             Self::CopyAsFiles => "Copy as file (Ctrl+V in other apps)",
+            Self::RestoreSession => "Reopen the files of the last session",
             Self::Bookmark => "Pin to Quick Access (toggle)",
             Self::Trash => "Move to trash",
             Self::DeleteForGood => "Delete for good",
@@ -211,6 +214,7 @@ impl Action {
             Self::CopyPath => "Alt+C",
             Self::DragOut => "Alt+D  (drag to the window edge)",
             Self::CopyAsFiles => "Alt+F",
+            Self::RestoreSession => "Alt+S",
             Self::Bookmark => "Ctrl+D",
             Self::Trash => "Del",
             Self::DeleteForGood => "Shift+Del",
@@ -285,6 +289,7 @@ pub fn for_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('c') if alt => Action::CopyPath,
         KeyCode::Char('d') if alt => Action::DragOut,
         KeyCode::Char('f') if alt => Action::CopyAsFiles,
+        KeyCode::Char('s') if alt => Action::RestoreSession,
         KeyCode::Char('~') => Action::Home,
         KeyCode::Char('v') => Action::SmallLarge,
         KeyCode::Char('s') => Action::SortNext,
@@ -348,6 +353,7 @@ pub const HELP: &[Help] = &[
     Help::Keys("drag onto a folder", "Move (hold Ctrl: copy)"),
     Help::Action(Action::DragOut),
     Help::Action(Action::CopyAsFiles),
+    Help::Action(Action::RestoreSession),
     Help::Keys("drop files on the window", "Copy them into this folder"),
     Help::Action(Action::Copy),
     Help::Action(Action::Cut),
@@ -410,6 +416,7 @@ impl App {
             Action::CopyPath => self.copy_paths_osc52(),
             Action::DragOut => self.drag_out_targets(),
             Action::CopyAsFiles => self.copy_as_files(),
+            Action::RestoreSession => self.restore_session(),
             Action::Bookmark => self.toggle_bookmark(),
             Action::Trash => self.trash_targets(),
             Action::DeleteForGood => self.ask_delete(),
@@ -449,7 +456,12 @@ impl App {
             Action::TerminalFullScreen => self.toggle_fullscreen(),
             Action::Theme => self.open_theme_picker(),
             Action::Keys => self.help_open = true,
-            Action::Quit => self.running = self.unsaved_code_tab(),
+            Action::Quit => {
+                self.running = self.unsaved_code_tab();
+                if !self.running {
+                    self.save_session();
+                }
+            }
             Action::GitPanel => self.toggle_git_panel(),
             Action::GitStage => self.git_stage(),
             Action::GitUnstage => self.git_unstage(),

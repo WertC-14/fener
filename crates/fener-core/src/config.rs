@@ -42,6 +42,8 @@ pub struct EditorOptions {
     pub line_numbers: LineNumbers,
     pub indent: usize,
     pub tree_open: bool,
+    /// Brackets and quotes close themselves.
+    pub auto_pairs: bool,
 }
 
 impl Default for EditorOptions {
@@ -50,6 +52,7 @@ impl Default for EditorOptions {
             line_numbers: LineNumbers::Absolute,
             indent: 2,
             tree_open: true,
+            auto_pairs: true,
         }
     }
 }

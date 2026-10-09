@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fener_core::picker::{self, Item, Kind};
 use fener_core::{Document, Editor, Key, Mode, Request, State, files, tree};
 use liman_core::FileType;
-use liman_core::i18n::trf;
+use liman_core::i18n::{tr, trf};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -241,6 +241,8 @@ impl App {
     /// Does what code tab `i`'s editor asked for (state on the spot, lists on a worker).
     fn code_requests(&mut self, i: usize) {
         let mut switch_to = None;
+        let mut restore = false;
+        let (folders, total) = (self.tabs.count(), self.tabs.count() + self.code.tabs.len());
         let tab = &mut self.code.tabs[i];
         for request in std::mem::take(&mut tab.editor.requests) {
             match request {
@@ -253,6 +255,27 @@ impl App {
                 }
                 Request::SwitchTab(n) => {
                     switch_to = Some(n);
+                    continue;
+                }
+                Request::CycleTab(step) => {
+                    let here = folders + i;
+                    let to = (here as isize + step).rem_euclid(total as isize) as usize;
+                    switch_to = Some(to);
+                    continue;
+                }
+                // Space g g: lazygit gets the whole terminal (as $EDITOR does for liman).
+                Request::Lazygit => {
+                    if in_path("lazygit") {
+                        let root = tab.editor.root.clone();
+                        self.external = Some(("lazygit -p".into(), root));
+                    } else {
+                        tab.editor.message =
+                            Some("lazygit is not installed: sudo pacman -S lazygit".into());
+                    }
+                    continue;
+                }
+                Request::RestoreSession => {
+                    restore = true;
                     continue;
                 }
                 // Space t, Ctrl+/: open the shell and type there, or close it if it is open.
@@ -326,6 +349,9 @@ impl App {
         if let Some(n) = switch_to {
             self.switch_any_tab(n);
         }
+        if restore {
+            self.restore_session();
+        }
     }
 
     /// Draws the active code tab into `area`; returns where the terminal cursor goes.
@@ -375,6 +401,44 @@ impl App {
         }
     }
 
+    /// Writes the open code tabs (file and cursor line) for the next start (Space q s, Alt+S).
+    /// An empty list keeps the last one: quitting from the files alone forgets nothing.
+    pub fn save_session(&self) {
+        let files: Vec<(std::path::PathBuf, usize)> = self
+            .code
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                Some((
+                    std::path::absolute(t.editor.doc.path()?).ok()?,
+                    t.editor.line(),
+                ))
+            })
+            .collect();
+        if !files.is_empty() && !self.code.no_state {
+            let _ = fener_core::state::save_session(&files);
+        }
+    }
+
+    /// Opens the last session's files again (those not open already), each at its line.
+    pub(super) fn restore_session(&mut self) {
+        let files = fener_core::state::load_session();
+        if files.is_empty() {
+            self.message = Some(tr("No earlier session to restore").into());
+            return;
+        }
+        for (path, line) in files {
+            self.open_code_tab(&path);
+            if let Some(i) = self.code.active
+                && self.code.tabs[i].editor.doc.path() == Some(path.as_path())
+            {
+                let editor = &mut self.code.tabs[i].editor;
+                let last = fener_core::text::line_count(&editor.doc.rope).saturating_sub(1);
+                editor.cursor = fener_core::text::first_non_blank(&editor.doc.rope, line.min(last));
+            }
+        }
+    }
+
     /// The code tab that owns the shell `id`, if any.
     pub(super) fn code_tab_with_terminal(&mut self, id: u64) -> Option<&mut CodeTab> {
         self.code
@@ -391,6 +455,12 @@ impl App {
             Mode::Insert | Mode::Command | Mode::Search
         ))
     }
+}
+
+/// Whether `program` is on `$PATH`.
+fn in_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(program).is_file()))
 }
 
 /// Shows the code tab's shell, starting it in `dir` if it is not running. False if it cannot.
@@ -438,6 +508,7 @@ fn convert(key: KeyEvent) -> Option<Key> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     Some(match key.code {
         KeyCode::Char(c) if ctrl => Key::Ctrl(c.to_ascii_lowercase()),
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => Key::Alt(c),
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Esc => Key::Esc,
         KeyCode::Enter => Key::Enter,

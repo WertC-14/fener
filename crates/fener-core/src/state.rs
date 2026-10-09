@@ -63,6 +63,31 @@ impl State {
     }
 }
 
+/// The code tabs open when fener last quit: each file and its cursor line (Space q s, Alt+S).
+pub fn save_session(files: &[(PathBuf, usize)]) -> io::Result<()> {
+    let Some(d) = dir() else { return Ok(()) };
+    fs::create_dir_all(&d)?;
+    let text: String = files
+        .iter()
+        .map(|(path, line)| format!("{line}\t{}\n", path.display()))
+        .collect();
+    fs::write(d.join("session"), text)
+}
+
+/// The last session's files that still exist.
+pub fn load_session() -> Vec<(PathBuf, usize)> {
+    let Some(text) = dir().and_then(|d| fs::read_to_string(d.join("session")).ok()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| {
+            let (line, path) = l.split_once('\t')?;
+            let path = PathBuf::from(path);
+            path.exists().then(|| (path, line.parse().unwrap_or(0)))
+        })
+        .collect()
+}
+
 fn dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
