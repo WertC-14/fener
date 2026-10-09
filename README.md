@@ -52,8 +52,8 @@ follows the file: code files get run / build, Markdown files get the reader and 
 - `Shift+H` / `Shift+L` previous / next tab, `Alt+J` / `Alt+K` move lines (Visual: the selection), `gcc` / `gc`
   comment in or out, brackets and quotes close themselves (`[editor] auto-pairs`), `Space g g` lazygit,
   `Space q s` (or `Alt+S` in the files) reopens the files of the last session
-- Drag and drop with other apps: `Alt+D` or an entry dragged to the window edge opens ripdrag, `Alt+F` copies as
-  file; files dropped on the window are copied into the open folder
+- Files to other apps: `Alt+F` (or drag an entry to the window edge) copies them as files, `Ctrl+V` in a browser
+  or chat pastes them; files dropped on the window are copied into the open folder
 - IDE keys in every mode: `Ctrl+Z` undo, `Ctrl+Y` redo, `Ctrl+S` save; in Markdown `Ctrl+E` switches between the
   reader and editing (as in Obsidian; the status line shows it)
 - Search `/` `?` with smart case, `:w`, `:e FILE`, `Ctrl+S`
