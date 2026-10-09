@@ -22,6 +22,8 @@ pub enum AppEvent {
         version: u64,
         result: Result<String, String>,
     },
+    /// Something drawn changed off the main thread (tree-sitter colors are ready).
+    Redraw,
     /// Every few seconds: the open folder's modification time is checked (see `watch.rs`).
     Tick,
     /// A list a code tab's picker asked for (Find Files, grep), made on a worker.

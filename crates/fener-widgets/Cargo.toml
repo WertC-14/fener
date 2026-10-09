@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 fener-core.workspace = true
+ropey = "1.6"
 unicode-width = "0.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 

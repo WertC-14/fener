@@ -383,6 +383,7 @@ impl App {
     pub fn handle(&mut self, event: AppEvent) {
         match event {
             AppEvent::Tick => self.check_folder(false),
+            AppEvent::Redraw => self.dirty = true,
             AppEvent::CodeFormatted {
                 id,
                 version,

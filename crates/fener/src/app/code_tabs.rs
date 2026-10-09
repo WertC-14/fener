@@ -110,10 +110,15 @@ impl App {
         }
         editor.remember(&path);
         self.code.next_id += 1;
+        let mut view = fener_widgets::View::default();
+        let tx = self.tx.clone();
+        view.on_ready = Some(std::sync::Arc::new(move || {
+            let _ = tx.send(AppEvent::Redraw);
+        }));
         self.code.tabs.push(CodeTab {
             id: self.code.next_id,
             editor,
-            view: fener_widgets::View::default(),
+            view,
             terminal: None,
             term_open: false,
             term_focus: false,

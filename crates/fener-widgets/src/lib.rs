@@ -10,6 +10,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use fener_core::command::DASHBOARD;
+use fener_core::highlight;
 use fener_core::picker::{Kind, Picker};
 use fener_core::syntax::{self, Kind as TextKind, Lang};
 use fener_core::text;
@@ -89,6 +90,64 @@ fn t() -> Theme {
 /// Cells a tab takes (LazyVim: `tabstop = 2`).
 const TAB_WIDTH: usize = 2;
 
+/// tree-sitter's spans for one version of a document.
+type Colors = (u64, std::sync::Arc<Vec<highlight::Span>>);
+
+/// Runs tree-sitter for the newest version of a document on a worker thread and keeps the
+/// latest result.
+#[derive(Default)]
+struct Painter {
+    /// The version asked for last; a worker that sees a newer one gives up.
+    wanted: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    asked: Option<u64>,
+    /// The file the colors are for; another file starts over.
+    path: Option<std::path::PathBuf>,
+    done: std::sync::Arc<std::sync::Mutex<Option<Colors>>>,
+}
+
+impl Painter {
+    fn colors(
+        &mut self,
+        grammar: highlight::Grammar,
+        path: &std::path::Path,
+        version: u64,
+        rope: &ropey::Rope,
+        on_ready: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    ) -> Option<std::sync::Arc<Vec<highlight::Span>>> {
+        use std::sync::atomic::Ordering;
+        if self.path.as_deref() != Some(path) {
+            // Fresh slots: a worker still busy with the old file writes into the old ones.
+            *self = Self {
+                path: Some(path.to_path_buf()),
+                ..Self::default()
+            };
+        }
+        if self.asked != Some(version) {
+            self.asked = Some(version);
+            self.wanted.store(version, Ordering::Relaxed);
+            let (wanted, done) = (self.wanted.clone(), self.done.clone());
+            let text = rope.to_string();
+            std::thread::spawn(move || {
+                if wanted.load(Ordering::Relaxed) != version {
+                    return; // typed on meanwhile: a newer job follows
+                }
+                let Some(spans) = highlight::highlight(grammar, &text) else {
+                    return;
+                };
+                if let Ok(mut slot) = done.lock()
+                    && slot.as_ref().is_none_or(|(v, _)| *v < version)
+                {
+                    *slot = Some((version, std::sync::Arc::new(spans)));
+                }
+                if let Some(wake) = on_ready {
+                    wake();
+                }
+            });
+        }
+        self.done.lock().ok()?.as_ref().map(|(_, s)| s.clone())
+    }
+}
+
 /// What the UI keeps between frames.
 #[derive(Default)]
 pub struct View {
@@ -97,6 +156,11 @@ pub struct View {
     /// Highlighting state at the first line on screen, for (document version, that line):
     /// scanning from the top of the file is needed only when either changes.
     syntax: Option<(u64, usize, syntax::State)>,
+    /// tree-sitter colors (ADR 0015), made on a worker thread so typing never waits for a
+    /// parse (a 3000-line file takes ~30 ms).
+    tree_sitter: Painter,
+    /// Called from the worker when new colors are ready: the app redraws.
+    pub on_ready: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Draws `editor` into `area` with `theme`; returns where the terminal cursor goes.
@@ -194,6 +258,15 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
     }
     let matches = search_matches(editor, area.height);
     let lang = editor.doc.path().map_or(Lang::Plain, Lang::from_path);
+    // tree-sitter when the language has a grammar. Until the worker has colors for this version,
+    // the last ones are used (a few characters may be off for a moment while typing).
+    let grammar = editor.doc.path().and_then(highlight::Grammar::from_path);
+    let spans = grammar.zip(editor.doc.path()).and_then(|(g, path)| {
+        let on_ready = view.on_ready.clone();
+        view.tree_sitter
+            .colors(g, path, editor.doc.version(), rope, on_ready)
+    });
+    let spans = spans.as_deref();
     let key = (editor.doc.version(), editor.top);
     let mut state = match view.syntax {
         Some((version, top, state)) if (version, top) == key => state,
@@ -242,7 +315,12 @@ fn draw_text(buf: &mut Buffer, area: Rect, editor: &Editor, view: &mut View) -> 
         let start = text::line_start(rope, line);
         let len = text::line_len(rope, line);
         let x0 = area.x + gutter as u16 + 1;
-        let kinds = syntax::line_kinds(lang, &text::line_text(rope, line), &mut state);
+        let content = text::line_text(rope, line);
+        let scanned = syntax::line_kinds(lang, &content, &mut state);
+        let kinds = match spans {
+            Some(spans) => kinds_from_spans(spans, rope.char_to_byte(start), &content),
+            None => scanned,
+        };
         let mut col = 0;
         for (i, c) in rope.slice(start..start + len).chars().enumerate() {
             let pos = start + i;
@@ -305,6 +383,27 @@ fn draw_reader(buf: &mut Buffer, area: Rect, editor: &Editor) {
             y += 1;
         }
     }
+}
+
+/// The kind of each character of a line from tree-sitter's spans (`line_byte`: where the line
+/// starts in the text, in bytes).
+fn kinds_from_spans(spans: &[highlight::Span], line_byte: usize, content: &str) -> Vec<TextKind> {
+    let mut kinds = Vec::with_capacity(content.len());
+    let line_end = line_byte + content.len();
+    let mut i = spans.partition_point(|s| s.end <= line_byte);
+    let mut byte = line_byte;
+    for c in content.chars() {
+        while i < spans.len() && spans[i].end <= byte {
+            i += 1;
+        }
+        let kind = match spans.get(i) {
+            Some(s) if s.start <= byte && byte < s.end && s.start < line_end => s.kind,
+            _ => TextKind::Plain,
+        };
+        kinds.push(kind);
+        byte += c.len_utf8();
+    }
+    kinds
 }
 
 /// The color of a kind of text (tokyonight's choices: keywords purple, functions blue,

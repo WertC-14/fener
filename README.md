@@ -55,8 +55,8 @@ follows the file: code files get run / build, Markdown files get the reader and 
 - IDE keys in every mode: `Ctrl+Z` undo, `Ctrl+Y` redo, `Ctrl+S` save; in Markdown `Ctrl+E` switches between the
   reader and editing (as in Obsidian; the status line shows it)
 - Search `/` `?` with smart case, `:w`, `:e FILE`, `Ctrl+S`
-- Syntax colors (keywords, functions and macros, types, strings, numbers, comments) for C-like, `#`-comment and
-  `--`-comment languages and Markdown, in the file manager's theme
+- Syntax colors by tree-sitter for Rust, C, C++, C#, Python, JavaScript, TypeScript, Bash, TOML, JSON, Markdown and
+  Lua (code in Markdown fences too), parsed on a worker thread; other files get a simple scanner
 - Markdown files open in a reader: headings, lists, task boxes, quotes, framed code, **bold**, *italic*, links,
   wrapped at words. `j k Ctrl+D Ctrl+U g G` scroll, `i`, `Esc` or `Ctrl+E` edits the source there, `Space r` or `Ctrl+E` back
 
@@ -88,7 +88,7 @@ Commands: `run`, `terminal`, `explorer`, `find-files`, `find-in-file`, `find-tex
 
 ## Not yet (on purpose)
 
-LSP, tree-sitter, plugins, split windows, a config file for the editor, Obsidian vault.
+LSP, plugins, split windows, a config file for the editor, Obsidian vault.
 Find Files does not read `.gitignore` yet (hidden folders, `target`, `node_modules` are skipped).
 
 ## Build
