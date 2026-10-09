@@ -811,7 +811,11 @@ mod tests {
             app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
         }
         pump(&mut app, &rx, |a| {
-            a.code.tabs[0].editor.picker.as_ref().is_some_and(|p| !p.loading)
+            a.code.tabs[0]
+                .editor
+                .picker
+                .as_ref()
+                .is_some_and(|p| !p.loading)
         });
         for c in "b.txt".chars() {
             app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
