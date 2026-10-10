@@ -2816,8 +2816,9 @@ mod tests {
                 ('↵', "Run (F5)"),
                 (' ', "Find Files"),
                 ('1', "1…9  Go to Tab (1: files)"),
-                ('-', "Split Window Below (another file)"),
+                ('-', "Split Window Below"),
                 ('/', "Find Text (Grep)"),
+                ('a', "Split Window Below"),
                 ('b', "Build / Check (no run)"),
                 ('c', "+code"),
                 ('e', "Explorer (folder tree; Ctrl+B)"),
@@ -2828,8 +2829,9 @@ mod tests {
                 ('s', "+search"),
                 ('t', "Terminal open / close (Ctrl+/)"),
                 ('u', "+ui"),
+                ('v', "Split Window Right (side by side)"),
                 ('w', "Save (Ctrl+S)"),
-                ('|', "Split Window Right (another file)")
+                ('|', "Split Window Right (side by side)")
             ])
         );
         e.handle_key(Key::Char('u'));

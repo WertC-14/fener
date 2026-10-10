@@ -162,16 +162,19 @@ pub const COMMANDS: &[Binding] = &[
         "Restore Session (last open files)",
     ),
     bind(Command::Lazygit, "gg", "Lazygit"),
+    // `v` and `a` as well as LazyVim's `|` and `-`: those need AltGr on some keyboards (Turkish).
+    bind(
+        Command::SplitRight,
+        "v",
+        "Split Window Right (side by side)",
+    ),
+    bind(Command::SplitBelow, "a", "Split Window Below"),
     bind(
         Command::SplitRight,
         "|",
-        "Split Window Right (another file)",
+        "Split Window Right (side by side)",
     ),
-    bind(
-        Command::SplitBelow,
-        "-",
-        "Split Window Below (another file)",
-    ),
+    bind(Command::SplitBelow, "-", "Split Window Below"),
     bind(Command::CloseWindow, "qw", "Close This Window (split)"),
     bind(Command::Format, "cf", "Format File"),
     bind(Command::Dashboard, "", "Start Screen (:Dashboard)"),
