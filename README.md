@@ -49,7 +49,7 @@ follows the file: code files get run / build, Markdown files get the reader and 
   shfmt, taplo; `[format]` in the config overrides), one undo step
 - Split a code tab: `Space v` (or `Space |`) side by side, `Space a` (or `Space -`) one above the other; the new window
   shows the same file (typing shows in both) and offers Find Files for another one;
-  `Ctrl+H/J/K/L` between the windows, `Space q w` or `:q` closes one. Each window has its own file
+  `Ctrl+H/J/K/L` between the windows, `Space q w` or `:q` closes one (nothing unsaved is lost)
 - `Shift+H` / `Shift+L` previous / next tab, `Alt+J` / `Alt+K` move lines (Visual: the selection), `gcc` / `gc`
   comment in or out, brackets and quotes close themselves (`[editor] auto-pairs`), `Space g g` lazygit,
   `Space q s` (or `Alt+S` in the files) reopens the files of the last session
