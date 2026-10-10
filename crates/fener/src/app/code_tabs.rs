@@ -41,6 +41,7 @@ pub struct Pane {
 impl CodeTab {
     /// The other window gets the focus (the two trade places in the fields).
     fn swap_panes(&mut self) {
+        self.follow_changes();
         let Some(other) = self.other.as_deref_mut() else {
             return;
         };
@@ -51,6 +52,101 @@ impl CodeTab {
         std::mem::swap(&mut self.sent_modified, &mut other.sent_modified);
         std::mem::swap(&mut self.lsp_path, &mut other.lsp_path);
         self.other_first = !self.other_first;
+        if self.shared {
+            // One document, held by the focused window; the language server's view of it and
+            // the answers about it go with it.
+            let other = self.other.as_deref_mut().expect("split");
+            std::mem::swap(&mut self.editor.doc, &mut other.editor.doc);
+            std::mem::swap(&mut self.editor.lsp, &mut other.editor.lsp);
+            std::mem::swap(&mut self.server, &mut other.server);
+            std::mem::swap(&mut self.sent_version, &mut other.sent_version);
+            std::mem::swap(&mut self.sent_modified, &mut other.sent_modified);
+            std::mem::swap(&mut self.lsp_path, &mut other.lsp_path);
+            other.editor.lsp.diagnostics = self.editor.lsp.diagnostics.clone();
+            self.editor.shared = true;
+            other.editor.shared = false;
+        }
+    }
+
+    /// The other window's cursor follows the changes made here to the document they share.
+    fn follow_changes(&mut self) {
+        let Some(other) = self.other.as_deref_mut() else {
+            return;
+        };
+        if !self.shared {
+            return;
+        }
+        let changes = self.editor.doc.take_changes();
+        // A line put in right at the cursor (`O` above it) pushes the cursor down with its line;
+        // other text typed there leaves it before, as in Vim.
+        let follow = |change: &fener_core::document::Edit, pos: usize| {
+            if change.from == change.to && pos == change.from && change.text.ends_with('\n') {
+                pos + change.text.chars().count()
+            } else {
+                change.map(pos)
+            }
+        };
+        let o = &mut other.editor;
+        for change in &changes {
+            o.cursor = follow(change, o.cursor);
+            o.anchor = follow(change, o.anchor);
+        }
+        let len = self.editor.doc.rope.len_chars();
+        o.cursor = o.cursor.min(len);
+        o.anchor = o.anchor.min(len);
+    }
+
+    /// Both windows show the other window's document from now on (the focused one opened the
+    /// same file, or the window was just split): it may have unsaved changes, so it wins.
+    fn share_other_doc(&mut self) {
+        let Some(other) = self.other.as_deref_mut() else {
+            return;
+        };
+        let doc = std::mem::replace(&mut other.editor.doc, Document::new(""));
+        let len = doc.rope.len_chars();
+        let e = &mut self.editor;
+        e.doc = doc;
+        e.doc.track_changes(true);
+        e.cursor = e.cursor.min(len);
+        e.anchor = e.anchor.min(len);
+        e.reader = other.editor.reader;
+        e.reader_top = other.editor.reader_top;
+        e.shared = true;
+        e.lsp = std::mem::take(&mut other.editor.lsp);
+        other.editor.lsp.diagnostics = e.lsp.diagnostics.clone();
+        self.server = other.server.take();
+        self.sent_version = other.sent_version;
+        self.sent_modified = other.sent_modified;
+        self.lsp_path = other.lsp_path.take();
+        // Colors cached for the old text would be wrong for this one.
+        let on_ready = self.view.on_ready.clone();
+        self.view = fener_widgets::View::default();
+        self.view.on_ready = on_ready;
+        self.shared = true;
+    }
+
+    /// The focused window opened another file: the document they shared goes back to the other
+    /// window, with the language server's view of it.
+    fn unshare(&mut self, doc: Document) {
+        let other = self.other.as_deref_mut().expect("split");
+        other.editor.doc = doc;
+        other.editor.doc.track_changes(false);
+        other.editor.lsp = std::mem::take(&mut self.editor.lsp);
+        other.server = self.server.take();
+        other.sent_version = self.sent_version;
+        other.sent_modified = self.sent_modified;
+        other.lsp_path = self.lsp_path.take();
+        self.editor.shared = false;
+        self.shared = false;
+    }
+
+    /// Unsaved changes that closing the whole tab would lose (either window).
+    fn is_modified(&self) -> bool {
+        self.editor.doc.is_modified()
+            || self
+                .other
+                .as_deref()
+                .is_some_and(|o| !self.shared && o.editor.doc.is_modified())
     }
 }
 
@@ -77,6 +173,9 @@ pub struct CodeTab {
     pub(super) other: Option<Box<Pane>>,
     /// Side by side (`|`) or one above the other (`-`).
     vertical: bool,
+    /// Both windows show the same file: one document, held by the focused window (the other
+    /// borrows it to be drawn), so typing in one shows in the other.
+    shared: bool,
     /// The other window is drawn first (left / top).
     other_first: bool,
     pub term_open: bool,
@@ -180,6 +279,7 @@ impl App {
             other: None,
             vertical: true,
             other_first: false,
+            shared: false,
             term_open: false,
             term_focus: false,
         });
@@ -205,7 +305,7 @@ impl App {
     /// to drop them).
     pub(super) fn close_code_tab(&mut self, i: usize, force: bool) {
         let tab = &self.code.tabs[i];
-        if tab.editor.doc.is_modified() && !force {
+        if tab.is_modified() && !force {
             self.code.active = Some(i);
             self.code.tabs[i].editor.message =
                 Some("No write since last change (:w saves, :q! drops the changes)".into());
@@ -228,12 +328,7 @@ impl App {
 
     /// Before liman quits: the first code tab with unsaved changes, shown with a warning.
     pub(super) fn unsaved_code_tab(&mut self) -> bool {
-        let Some(i) = self
-            .code
-            .tabs
-            .iter()
-            .position(|t| t.editor.doc.is_modified())
-        else {
+        let Some(i) = self.code.tabs.iter().position(|t| t.is_modified()) else {
             return false;
         };
         self.code.active = Some(i);
@@ -307,6 +402,7 @@ impl App {
             return;
         };
         self.code.tabs[i].editor.handle_key(key);
+        self.split_sync(i);
         self.lsp_sync(i);
         self.code_requests(i);
         // fener sets `quit` only when nothing is unsaved or `:q!` said to drop it. In a split
@@ -329,6 +425,7 @@ impl App {
             let key = if c == '\n' { Key::Enter } else { Key::Char(c) };
             self.code.tabs[i].editor.handle_key(key);
         }
+        self.split_sync(i);
         self.lsp_sync(i);
         self.dirty = true;
     }
@@ -416,8 +513,46 @@ impl App {
         }
     }
 
-    /// `Space |` / `Space -`: a second window in tab `i`, which asks for its file (Find Files).
-    /// Each window has a file of its own: two editors on one file would overwrite each other.
+    /// After a key in tab `i`'s focused window: the other window's cursor follows the shared
+    /// text; the window that opened the other window's file shares its document; the one that
+    /// opened another file gives the shared document back.
+    fn split_sync(&mut self, i: usize) {
+        let tab = &mut self.code.tabs[i];
+        let Some(other) = tab.other.as_deref() else {
+            return;
+        };
+        if tab.shared {
+            match tab.editor.left.take() {
+                // `:e!` read the same file again: both windows show the new copy.
+                Some(old) if old.path() == tab.editor.doc.path() => {
+                    tab.editor.shared = true;
+                    tab.editor.doc.track_changes(true);
+                    let len = tab.editor.doc.rope.len_chars();
+                    if let Some(other) = tab.other.as_deref_mut() {
+                        other.editor.cursor = other.editor.cursor.min(len);
+                        other.editor.anchor = other.editor.anchor.min(len);
+                    }
+                }
+                Some(doc) => tab.unshare(doc),
+                None => tab.follow_changes(),
+            }
+            return;
+        }
+        let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let mine = tab.editor.doc.path().map(absolute);
+        if mine.is_some() && mine == other.editor.doc.path().map(absolute) {
+            // This window's fresh copy from the disk goes; its server attachment too.
+            if let (Some(id), Some(path)) = (tab.server.take(), tab.lsp_path.take())
+                && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
+            {
+                server.client.close(&path);
+            }
+            self.code.tabs[i].share_other_doc();
+        }
+    }
+
+    /// `Space |` / `Space -`: a second window in tab `i` on the same file (as Vim's `:vsplit`),
+    /// with Find Files open to show another one there (Esc keeps the same file).
     fn split(&mut self, i: usize, vertical: bool) {
         let tab = &mut self.code.tabs[i];
         if tab.other.is_some() {
@@ -429,6 +564,8 @@ impl App {
         editor.root = tab.editor.root.clone();
         editor.state = State::load();
         editor.apply_config(&self.code.config);
+        editor.cursor = tab.editor.cursor;
+        editor.top = tab.editor.top;
         let mut view = fener_widgets::View::default();
         view.on_ready = tab.view.on_ready.clone();
         tab.other = Some(Box::new(Pane {
@@ -443,6 +580,13 @@ impl App {
         // The new window gets the focus; the old one is drawn first (left / top).
         tab.other_first = false;
         tab.swap_panes();
+        if tab
+            .other
+            .as_deref()
+            .is_some_and(|o| o.editor.doc.path().is_some())
+        {
+            tab.share_other_doc();
+        }
         tab.editor.run_command(fener_core::Command::FindFiles);
         self.code_requests(i);
     }
@@ -454,12 +598,14 @@ impl App {
             tab.editor.message = Some("Not split (Space | or Space - splits)".into());
             return;
         }
-        if tab.editor.doc.is_modified() && !force {
+        if tab.editor.doc.is_modified() && !force && !tab.shared {
             tab.editor.message =
                 Some("No write since last change (:w saves, :q! drops the changes)".into());
             return;
         }
-        if let (Some(id), Some(path)) = (tab.server, tab.lsp_path.clone())
+        // A shared document stays open in the other window (swap_panes hands it over).
+        if !tab.shared
+            && let (Some(id), Some(path)) = (tab.server, tab.lsp_path.clone())
             && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
         {
             server.client.close(&path);
@@ -468,6 +614,9 @@ impl App {
         tab.swap_panes();
         tab.other = None;
         tab.other_first = false;
+        tab.shared = false;
+        tab.editor.shared = false;
+        tab.editor.doc.track_changes(false);
     }
 
     /// Tells code tab `i`'s server about a change (the whole text) or a save; a different file
@@ -541,6 +690,11 @@ impl App {
                 for tab in self.code.tabs.iter_mut() {
                     if same(tab, &path) {
                         tab.editor.lsp.diagnostics = items.clone();
+                        if tab.shared
+                            && let Some(other) = tab.other.as_deref_mut()
+                        {
+                            other.editor.lsp.diagnostics = items.clone();
+                        }
                     }
                     // The window of a split without the focus, too.
                     if let Some(other) = tab.other.as_deref_mut()
@@ -823,6 +977,8 @@ impl App {
         let i = self.code.active?;
         let theme = theme_from_liman();
         let tab = &mut self.code.tabs[i];
+        // Changes that came without a key (formatting, a completion) move the other cursor too.
+        tab.follow_changes();
         let mut text_area = area;
         let mut term_cursor = None;
         if tab.term_open
@@ -878,7 +1034,14 @@ impl App {
                 }
             }
             let (mine, theirs) = if tab.other_first { (b, a) } else { (a, b) };
+            // A shared document is lent to the other window while it is drawn.
+            if tab.shared {
+                std::mem::swap(&mut tab.editor.doc, &mut other.editor.doc);
+            }
             fener_widgets::render(buf, theirs, &mut other.editor, &mut other.view, &theme);
+            if tab.shared {
+                std::mem::swap(&mut tab.editor.doc, &mut other.editor.doc);
+            }
             text_area = mine;
         }
         let text_cursor =

@@ -73,6 +73,9 @@ pub struct Document {
     /// Bumped by every change of the text, undo and redo included.
     version: u64,
     saved_version: u64,
+    /// Every change applied to the text since the last [`Document::take_changes`], undo and redo
+    /// included, while another window shows this document (it moves its cursor along).
+    log: Option<Vec<Edit>>,
 }
 
 impl Document {
@@ -85,6 +88,7 @@ impl Document {
             open: None,
             version: 0,
             saved_version: 0,
+            log: None,
         }
     }
 
@@ -128,6 +132,22 @@ impl Document {
         self.version
     }
 
+    /// Starts or stops keeping the changes for [`Document::take_changes`].
+    pub fn track_changes(&mut self, on: bool) {
+        self.log = on.then(Vec::new);
+    }
+
+    /// The changes since the last call, in the order they were applied.
+    pub fn take_changes(&mut self) -> Vec<Edit> {
+        self.log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    fn logged(&mut self, edit: &Edit) {
+        if let Some(log) = &mut self.log {
+            log.push(edit.clone());
+        }
+    }
+
     /// Starts an undo step: every edit until [`Document::end_step`] is undone together.
     pub fn begin_step(&mut self, cursor: usize) {
         if self.open.is_none() {
@@ -166,6 +186,7 @@ impl Document {
         };
         let inverse = edit.inverse(&self.rope);
         edit.apply(&mut self.rope);
+        self.logged(&edit);
         self.version += 1;
         let single = self.open.is_none();
         if single {
@@ -185,6 +206,7 @@ impl Document {
         let step = self.done.pop()?;
         for inverse in step.inverses.iter().rev() {
             inverse.apply(&mut self.rope);
+            self.logged(inverse);
         }
         self.version += 1;
         let cursor = step.cursor_before;
@@ -197,6 +219,7 @@ impl Document {
         let step = self.undone.pop()?;
         for edit in &step.edits {
             edit.apply(&mut self.rope);
+            self.logged(edit);
         }
         self.version += 1;
         let cursor = step.cursor_after;
@@ -247,6 +270,22 @@ mod tests {
         assert_eq!(e.map(1), 1);
         assert_eq!(e.map(6), 5); // 3 removed, 2 inserted
         assert_eq!(e.map(3), 3); // inside the replaced range: clamps into the new text
+    }
+
+    #[test]
+    fn changes_are_kept_while_tracked() {
+        let mut doc = Document::new("abc");
+        doc.edit(0, 0, "x");
+        assert!(doc.take_changes().is_empty(), "not tracked");
+        doc.track_changes(true);
+        doc.edit(1, 2, "");
+        doc.undo();
+        let changes = doc.take_changes();
+        assert_eq!(changes.len(), 2);
+        // A cursor on "c" (index 3 in "xabc") follows the delete and its undo.
+        let pos = changes.iter().fold(3, |pos, e| e.map(pos));
+        assert_eq!(pos, 3);
+        assert!(doc.take_changes().is_empty());
     }
 
     #[test]

@@ -299,6 +299,12 @@ pub struct Editor {
     pub number: bool,
     pub relative_number: bool,
     pub quit: bool,
+    /// Another window shows this document too: closing this one or opening another file here
+    /// loses nothing, so unsaved changes do not stop it.
+    pub shared: bool,
+    /// The shared document this window let go of when it opened another file (the app hands
+    /// it back to the other window).
+    pub left: Option<Document>,
     /// The start screen is shown, with this menu row selected.
     pub dashboard: Option<usize>,
     pub picker: Option<Picker>,
@@ -357,6 +363,8 @@ impl Editor {
             // LazyVim has relative ones, `Space u L`).
             relative_number: false,
             quit: false,
+            shared: false,
+            left: None,
             dashboard: None,
             picker: None,
             requests: Vec::new(),
@@ -1096,7 +1104,7 @@ impl Editor {
             }
             Command::FindText => self.picker = Some(Picker::new(Kind::Grep, "Grep", Vec::new())),
             Command::NewFile => {
-                if self.doc.is_modified() {
+                if self.doc.is_modified() && !self.shared {
                     self.message = Some(NOT_SAVED.into());
                 } else {
                     self.load(Document::new(""));
@@ -1240,7 +1248,7 @@ impl Editor {
     pub fn open(&mut self, path: &Path, line: Option<usize>, force: bool) {
         let same = self.doc.path().is_some_and(|p| p == path);
         if !same || force {
-            if self.doc.is_modified() && !force {
+            if self.doc.is_modified() && !force && !self.shared {
                 self.message = Some(NOT_SAVED.into());
                 return;
             }
@@ -1833,7 +1841,11 @@ impl Editor {
     fn load(&mut self, doc: Document) {
         self.reader = doc.path().map(Lang::from_path) == Some(Lang::Markdown);
         self.reader_top = 0;
-        self.doc = doc;
+        let old = std::mem::replace(&mut self.doc, doc);
+        if self.shared {
+            self.shared = false;
+            self.left = Some(old);
+        }
         self.cursor = 0;
         self.anchor = 0;
         self.top = 0;
@@ -2241,7 +2253,7 @@ impl Editor {
         let modified = self.doc.is_modified();
         match name {
             "w" | "write" => self.save((!arg.is_empty()).then_some(arg)),
-            "q" | "quit" | "qa" | "qall" if modified => {
+            "q" | "quit" | "qa" | "qall" if modified && !self.shared => {
                 self.message = Some("No write since last change (add ! to override)".into());
             }
             "q" | "quit" | "qa" | "qall" | "q!" | "quit!" | "qa!" | "qall!" => self.quit = true,
