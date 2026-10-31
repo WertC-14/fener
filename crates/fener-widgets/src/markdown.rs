@@ -6,7 +6,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::t;
+use crate::theme::t;
 
 /// One source line as styled spans (not wrapped yet). `in_code`: inside a fenced code block,
 /// updated by fence lines. `width` is only used for horizontal rules.
