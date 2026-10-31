@@ -44,7 +44,13 @@ pub fn draw_status(buf: &mut Buffer, area: Rect, editor: &Editor) {
         Span::styled(modified, Style::new().fg(t().yellow)),
     ]);
     let lines = text::line_count(&editor.doc.rope);
-    let percent = match editor.line() {
+    // The reader scrolls without moving the cursor: its place is the line at the top.
+    let line = if editor.reader {
+        editor.reader_top
+    } else {
+        editor.line()
+    };
+    let percent = match line {
         0 => "Top".to_string(),
         l if l + 1 == lines => "Bot".to_string(),
         l => format!("{}%", (l + 1) * 100 / lines),
@@ -65,7 +71,11 @@ pub fn draw_status(buf: &mut Buffer, area: Rect, editor: &Editor) {
             Style::new().fg(color).bg(t().bg_line),
         ),
         Span::styled(
-            format!(" {}:{} ", editor.line() + 1, editor.col() + 1),
+            if editor.reader {
+                format!(" {}/{lines} ", line + 1)
+            } else {
+                format!(" {}:{} ", line + 1, editor.col() + 1)
+            },
             Style::new()
                 .fg(t().bg_dark)
                 .bg(color)
