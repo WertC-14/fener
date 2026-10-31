@@ -1,6 +1,6 @@
 //! The Markdown reader (`Space r`, Ctrl+E): the file shown formatted instead of as source. Headings
-//! without `#`, bullets, task boxes, quotes, rules, framed code blocks, inline `code`, **bold**,
-//! *italic* and [links](…) without their markers, wrapped at word boundaries. Ported from
+//! without `#`, bullets, task boxes, quotes, rules, framed code blocks, tables, inline `code`,
+//! **bold**, *italic* and [links](…) without their markers; paragraphs wrapped at word boundaries. Ported from
 //! liman's preview (`liman-widgets/src/markdown.rs`) to fener's theme.
 
 use ratatui::style::{Modifier, Style};
@@ -58,28 +58,7 @@ pub fn line(text: &str, in_code: &mut bool, width: usize) -> Vec<Span<'static>> 
         return out;
     }
     let indent = &text[..text.len() - trimmed.len()];
-    let (marker, rest) = if let Some(rest) = trimmed
-        .strip_prefix("- [ ] ")
-        .or_else(|| trimmed.strip_prefix("* [ ] "))
-    {
-        ("☐ ".to_string(), rest)
-    } else if let Some(rest) = ["- [x] ", "- [X] ", "* [x] "]
-        .iter()
-        .find_map(|m| trimmed.strip_prefix(m))
-    {
-        ("☑ ".to_string(), rest)
-    } else if let Some(rest) = ["- ", "* ", "+ "]
-        .iter()
-        .find_map(|m| trimmed.strip_prefix(m))
-    {
-        ("• ".to_string(), rest)
-    } else {
-        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
-        match trimmed[digits..].strip_prefix(". ") {
-            Some(rest) if digits > 0 => (format!("{}. ", &trimmed[..digits]), rest),
-            _ => (String::new(), trimmed),
-        }
-    };
+    let (marker, rest) = list_marker(trimmed).unwrap_or((String::new(), trimmed));
     let mut out = Vec::new();
     if !indent.is_empty() {
         out.push(Span::raw(indent.to_string()));
@@ -89,6 +68,316 @@ pub fn line(text: &str, in_code: &mut bool, width: usize) -> Vec<Span<'static>> 
     }
     out.extend(inline(rest));
     out
+}
+
+/// A list item's marker as shown (`• `, `☐ `, `☑ `, `3. `) and the text after it.
+fn list_marker(trimmed: &str) -> Option<(String, &str)> {
+    if let Some(rest) = trimmed
+        .strip_prefix("- [ ] ")
+        .or_else(|| trimmed.strip_prefix("* [ ] "))
+    {
+        Some(("☐ ".to_string(), rest))
+    } else if let Some(rest) = ["- [x] ", "- [X] ", "* [x] "]
+        .iter()
+        .find_map(|m| trimmed.strip_prefix(m))
+    {
+        Some(("☑ ".to_string(), rest))
+    } else if let Some(rest) = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|m| trimmed.strip_prefix(m))
+    {
+        Some(("• ".to_string(), rest))
+    } else {
+        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        match trimmed[digits..].strip_prefix(". ") {
+            Some(rest) if digits > 0 => Some((format!("{}. ", &trimmed[..digits]), rest)),
+            _ => None,
+        }
+    }
+}
+
+/// What a source line starts, for joining the lines of one block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    Blank,
+    Fence,
+    Rule,
+    Heading,
+    Quote,
+    Item,
+    Table,
+    Text,
+}
+
+fn start_of(text: &str) -> Start {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        Start::Blank
+    } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        Start::Fence
+    } else if is_rule(trimmed) {
+        Start::Rule
+    } else if heading(trimmed).is_some() {
+        Start::Heading
+    } else if trimmed.starts_with('>') {
+        Start::Quote
+    } else if list_marker(trimmed).is_some() {
+        Start::Item
+    } else if trimmed.starts_with('|') {
+        Start::Table
+    } else {
+        Start::Text
+    }
+}
+
+/// Two spaces or a `\` at the end: Markdown's line break inside a paragraph.
+fn hard_break(text: &str) -> bool {
+    text.ends_with("  ") || text.ends_with('\\')
+}
+
+/// A line that is only an image (`![alt](src)`): kept on a row of its own, as screenshots in a
+/// README are meant to be seen one by one.
+fn image_only(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("![") && text.ends_with(')') && text.matches("](").count() == 1
+}
+
+/// Source lines formatted for the reader, until `rows` screen rows are filled. Markdown breaks a
+/// paragraph only at a blank line (or after two spaces or `\`), so the lines of one paragraph,
+/// list item or quote are joined and wrapped together; a run of `|` lines is drawn as a table.
+/// `in_code`: the first line is inside a fenced code block.
+pub fn layout(
+    lines: impl Iterator<Item = String>,
+    mut in_code: bool,
+    width: usize,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = lines.peekable();
+    let mut out = Vec::new();
+    while out.len() < rows
+        && let Some(first) = lines.next()
+    {
+        let start = start_of(&first);
+        if in_code
+            || !matches!(
+                start,
+                Start::Text | Start::Item | Start::Quote | Start::Table
+            )
+        {
+            out.extend(wrap(line(&first, &mut in_code, width), width));
+            continue;
+        }
+        if start == Start::Table {
+            let mut table = vec![first];
+            while let Some(next) = lines.next_if(|l| start_of(l) == Start::Table) {
+                table.push(next);
+            }
+            out.extend(self::table(&table, width));
+            continue;
+        }
+        // Four spaces before plain text: an indented code block, kept line by line.
+        let indented_code = start == Start::Text && first.len() - first.trim_start().len() >= 4;
+        let mut joined = first.trim_end_matches('\\').trim_end().to_string();
+        let mut broken = hard_break(&first) || indented_code || image_only(&first);
+        while !broken
+            && let Some(next) = lines.next_if(|l| {
+                let s = start_of(l);
+                (s == Start::Text || (start == Start::Quote && s == Start::Quote)) && !image_only(l)
+            })
+        {
+            let mut more = next.trim();
+            if start == Start::Quote {
+                more = more.strip_prefix('>').unwrap_or(more).trim_start();
+            }
+            joined.push(' ');
+            joined.push_str(more.trim_end_matches('\\').trim_end());
+            broken = hard_break(&next);
+        }
+        let trimmed = joined.trim_start();
+        let indent = joined.len() - trimmed.len();
+        // Rows after the first start under the text, past the bullet or the quote bar.
+        let hang: Vec<(char, Style)> = match start {
+            Start::Quote => vec![('▎', Style::new().fg(t().blue)), (' ', Style::new())],
+            Start::Item => {
+                let marker = list_marker(trimmed).map_or(0, |(m, _)| m.chars().count());
+                vec![(' ', Style::new()); indent + marker]
+            }
+            _ => vec![(' ', Style::new()); indent],
+        };
+        out.extend(wrap_hanging(
+            line(&joined, &mut in_code, width),
+            width,
+            &hang,
+        ));
+    }
+    out
+}
+
+/// A table's cells (outer pipes dropped; `\|` stays a pipe inside a cell).
+fn cells(row: &str) -> Vec<String> {
+    let row = row.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    let row = row.strip_suffix('|').unwrap_or(row);
+    row.replace("\\|", "\u{0}")
+        .split('|')
+        .map(|c| c.trim().replace('\u{0}', "|"))
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alignment {
+    Left,
+    Center,
+    Right,
+}
+
+/// The `|---|:--:|` row under a table's header: each column's alignment.
+fn alignments(row: &[String]) -> Option<Vec<Alignment>> {
+    row.iter()
+        .map(|c| {
+            let dashes = c.trim_matches(':');
+            if dashes.is_empty() || !dashes.chars().all(|ch| ch == '-') {
+                return None;
+            }
+            Some(match (c.starts_with(':'), c.ends_with(':')) {
+                (true, true) => Alignment::Center,
+                (false, true) => Alignment::Right,
+                _ => Alignment::Left,
+            })
+        })
+        .collect()
+}
+
+type Cell = Vec<(char, Style)>;
+
+fn cell_width(cell: &[(char, Style)]) -> usize {
+    cell.iter()
+        .map(|(c, _)| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0))
+        .sum()
+}
+
+/// A cell's text in exactly `w` columns: padded as `align` says, or cut with `…`.
+fn fit(cell: &[(char, Style)], w: usize, align: Alignment) -> Cell {
+    let width_of = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+    let mut text: Cell = Vec::new();
+    let mut used = 0;
+    for &(c, style) in cell {
+        if used + width_of(c) > w {
+            while used + 1 > w
+                && let Some((gone, _)) = text.pop()
+            {
+                used -= width_of(gone);
+            }
+            text.push(('…', style));
+            used += 1;
+            break;
+        }
+        used += width_of(c);
+        text.push((c, style));
+    }
+    let pad = w.saturating_sub(used);
+    let (before, after) = match align {
+        Alignment::Left => (0, pad),
+        Alignment::Right => (pad, 0),
+        Alignment::Center => (pad / 2, pad - pad / 2),
+    };
+    let mut out = vec![(' ', Style::new()); before];
+    out.extend(text);
+    out.extend(vec![(' ', Style::new()); after]);
+    out
+}
+
+/// A table with its columns lined up and ` │ ` between them, and a bold header with a rule
+/// under it (left out when the header cells are all empty). Too wide for `width`: the widest
+/// columns shrink and their text ends in `…`.
+fn table(rows: &[String], width: usize) -> Vec<Line<'static>> {
+    let t = t();
+    let frame = Style::new().fg(t.gutter);
+    let mut grid: Vec<Vec<String>> = rows.iter().map(|r| cells(r)).collect();
+    // The separator is the second row when the table starts here; scrolled into a table, the
+    // rows on screen have none.
+    let align = grid.get(1).and_then(|r| alignments(r));
+    let header = if align.is_some() {
+        grid.remove(1);
+        Some(grid.remove(0))
+    } else {
+        None
+    };
+    let columns = grid
+        .iter()
+        .chain(header.iter())
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+    let align = align.unwrap_or_default();
+    let styled = |row: &[String], bold: bool| -> Vec<Cell> {
+        (0..columns)
+            .map(|i| {
+                inline(row.get(i).map_or("", String::as_str))
+                    .iter()
+                    .flat_map(|s| {
+                        let style = if bold {
+                            s.style.add_modifier(Modifier::BOLD)
+                        } else {
+                            s.style
+                        };
+                        s.content.chars().map(move |c| (c, style))
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let header = header
+        .filter(|h| h.iter().any(|c| !c.is_empty()))
+        .map(|h| styled(&h, true));
+    let body: Vec<Vec<Cell>> = grid.iter().map(|r| styled(r, false)).collect();
+    let mut widths: Vec<usize> = (0..columns)
+        .map(|i| {
+            header
+                .iter()
+                .chain(&body)
+                .map(|r| cell_width(&r[i]))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let room = width.saturating_sub(3 * columns.saturating_sub(1));
+    while widths.iter().sum::<usize>() > room
+        && let Some(widest) = widths.iter_mut().max().filter(|w| **w > 3)
+    {
+        *widest -= 1;
+    }
+    let draw = |row: &[Cell]| {
+        let mut out = Vec::new();
+        for (i, cell) in row.iter().enumerate() {
+            if i > 0 {
+                out.extend(" │ ".chars().map(|c| (c, frame)));
+            }
+            let a = align.get(i).copied().unwrap_or(Alignment::Left);
+            out.extend(fit(cell, widths[i], a));
+        }
+        spans_line(out)
+    };
+    let mut out = Vec::new();
+    if let Some(header) = &header {
+        out.push(draw(header));
+        let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+        out.push(Line::from(Span::styled(rule.join("─┼─"), frame)));
+    }
+    out.extend(body.iter().map(|r| draw(r)));
+    out
+}
+
+/// Styled characters as a line, neighbors with the same style in one span.
+fn spans_line(cells: Cell) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (c, style) in cells {
+        match spans.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), style)),
+        }
+    }
+    Line::from(spans)
 }
 
 fn is_rule(line: &str) -> bool {
@@ -174,21 +463,31 @@ fn inline(text: &str) -> Vec<Span<'static>> {
 /// Breaks styled text into rows of at most `width` cells, at spaces when it can (a word
 /// longer than a row is cut). Continuation rows keep the line's indent.
 pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+    let indent = spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .take_while(|c| *c == ' ')
+        .count();
+    wrap_hanging(spans, width, &vec![(' ', Style::new()); indent])
+}
+
+/// [`wrap`] with `hang` in front of every row after the first (at most half the width).
+fn wrap_hanging(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    hang: &[(char, Style)],
+) -> Vec<Line<'static>> {
     let cells: Vec<(char, Style)> = spans
         .iter()
         .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
         .collect();
     let width_of = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-    let indent = cells
-        .iter()
-        .take_while(|(c, _)| *c == ' ')
-        .count()
-        .min(width / 2);
+    let hang = &hang[..hang.len().min(width / 2)];
     let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
     let mut start = 0;
     while start < cells.len() || rows.is_empty() {
-        let prefix = if rows.is_empty() { 0 } else { indent };
-        let room = width.saturating_sub(prefix).max(1);
+        let prefix: &[(char, Style)] = if rows.is_empty() { &[] } else { hang };
+        let room = width.saturating_sub(cell_width(prefix)).max(1);
         let (mut end, mut used) = (start, 0);
         while end < cells.len() && used + width_of(cells[end].0) <= room {
             used += width_of(cells[end].0);
@@ -207,7 +506,7 @@ pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
             end = start + space + 1;
         }
         let end = end.max(start + 1).min(cells.len());
-        let mut row = vec![(' ', Style::new()); prefix];
+        let mut row = prefix.to_vec();
         let mut text = &cells[start..end];
         while let [rest @ .., (' ', _)] = text
             && !rest.is_empty()
@@ -224,18 +523,7 @@ pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
             break;
         }
     }
-    rows.into_iter()
-        .map(|row| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (c, style) in row {
-                match spans.last_mut() {
-                    Some(last) if last.style == style => last.content.to_mut().push(c),
-                    _ => spans.push(Span::styled(c.to_string(), style)),
-                }
-            }
-            Line::from(spans)
-        })
-        .collect()
+    rows.into_iter().map(spans_line).collect()
 }
 
 #[cfg(test)]
@@ -273,5 +561,70 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         assert_eq!(long, ["abc", "def", "gh"]);
+    }
+
+    fn layout_of(source: &str, width: usize) -> Vec<String> {
+        layout(source.lines().map(String::from), false, width, 100)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn lines_of_a_paragraph_are_joined_and_wrapped_together() {
+        let rows = layout_of("one two\nthree four\n\nnext", 40);
+        assert_eq!(rows, ["one two three four", "", "next"]);
+        // Two spaces or a backslash at the end keep the break.
+        assert_eq!(layout_of("a  \nb\\\nc", 40), ["a", "b", "c"]);
+        // Images on lines of their own stay apart.
+        assert_eq!(
+            layout_of("![one](a.png)\n![two](b.png)", 40),
+            ["[image: one]", "[image: two]"]
+        );
+    }
+
+    #[test]
+    fn list_items_and_quotes_continue_under_their_text() {
+        let rows = layout_of("- first item that\n  goes on\n- second", 14);
+        assert_eq!(rows, ["• first item", "  that goes on", "• second"]);
+        let rows = layout_of("> said one\n> two three", 12);
+        assert_eq!(rows, ["▎ said one", "▎ two three"]);
+    }
+
+    #[test]
+    fn code_stays_line_by_line() {
+        let rows = layout_of("```\nlet a;\nlet b;\n```\n\n    indented\n    code", 40);
+        assert_eq!(
+            rows,
+            [
+                "┌─",
+                "│ let a;",
+                "│ let b;",
+                "└─",
+                "",
+                "    indented",
+                "    code"
+            ]
+        );
+    }
+
+    #[test]
+    fn tables_line_up_their_columns() {
+        let rows = layout_of(
+            "| Key | What |\n|:---|---:|\n| `w` | save |\n| Space | menu |",
+            40,
+        );
+        assert_eq!(
+            rows,
+            [
+                "Key   │ What",
+                "──────┼─────",
+                "w     │ save",
+                "Space │ menu",
+            ]
+        );
+        // An empty header (a grid of keys) is left out; a narrow screen cuts the widest column.
+        let rows = layout_of("| | |\n|---|---|\n| abcdefghij | x |", 9);
+        assert_eq!(rows, ["abcd… │ x"]);
     }
 }

@@ -60,8 +60,8 @@ follows the file: code files get run / build, Markdown files get the reader and 
 - Search `/` `?` with smart case, `:w`, `:e FILE`, `Ctrl+S`
 - Syntax colors by tree-sitter for Rust, C, C++, C#, Python, JavaScript, TypeScript, Bash, TOML, JSON, Markdown and
   Lua (code in Markdown fences too), parsed on a worker thread; other files get a simple scanner
-- Markdown files open in a reader: headings, lists, task boxes, quotes, framed code, **bold**, *italic*, links,
-  wrapped at words. `j k Ctrl+D Ctrl+U g G` scroll, `i`, `Esc` or `Ctrl+E` edits the source there, `Space r` or `Ctrl+E` back
+- Markdown files open in a reader: headings, lists, task boxes, quotes, framed code, tables, **bold**, *italic*,
+  links; a paragraph's lines are joined and wrapped at words, as Markdown means them. `j k Ctrl+D Ctrl+U g G` scroll, `i`, `Esc` or `Ctrl+E` edits the source there, `Space r` or `Ctrl+E` back
 
 The file manager itself is liman's: grid / normal / detailed views, Places, preview, built-in terminal, git panel,
 tabs, themes. Its guide: [liman's KILAVUZ](https://github.com/WertC-14/liman/blob/main/docs/KILAVUZ.md).

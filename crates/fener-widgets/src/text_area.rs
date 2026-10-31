@@ -277,20 +277,11 @@ pub fn draw_reader(buf: &mut Buffer, area: Rect, editor: &Editor) {
     let rope = &editor.doc.rope;
     let width = usize::from(area.width.saturating_sub(4)).clamp(10, 100);
     let x = area.x + 2;
-    let mut in_code = syntax::state_after(Lang::Markdown, rope, editor.reader_top).in_fence();
-    let mut y = area.y;
-    for line in editor.reader_top..text::line_count(rope) {
-        if y >= area.bottom() {
-            break;
-        }
-        let spans = markdown::line(&text::line_text(rope, line), &mut in_code, width);
-        for row in markdown::wrap(spans, width) {
-            if y >= area.bottom() {
-                break;
-            }
-            row.render(Rect::new(x, y, width as u16, 1), buf);
-            y += 1;
-        }
+    let in_code = syntax::state_after(Lang::Markdown, rope, editor.reader_top).in_fence();
+    let lines = (editor.reader_top..text::line_count(rope)).map(|line| text::line_text(rope, line));
+    let rows = markdown::layout(lines, in_code, width, usize::from(area.height));
+    for (row, y) in rows.into_iter().zip(area.top()..area.bottom()) {
+        row.render(Rect::new(x, y, width as u16, 1), buf);
     }
 }
 
