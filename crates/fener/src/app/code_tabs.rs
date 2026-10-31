@@ -312,12 +312,16 @@ impl App {
             return;
         }
         let closed = self.code.tabs.remove(i);
-        if let (Some(id), Some(path)) = (closed.server, closed.editor.doc.path())
-            && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
-        {
-            server
-                .client
-                .close(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+        // Both windows of a split: the other one may have its own file open on a server, and
+        // a server must hear about the close before that file can be opened there again.
+        let windows = std::iter::once((closed.server, closed.lsp_path))
+            .chain(closed.other.map(|o| (o.server, o.lsp_path)));
+        for (id, path) in windows {
+            if let (Some(id), Some(path)) = (id, path)
+                && let Some(server) = self.code.servers.iter().find(|s| s.id == id)
+            {
+                server.client.close(&path);
+            }
         }
         self.code.active = match self.code.active {
             Some(a) if a == i => None,
