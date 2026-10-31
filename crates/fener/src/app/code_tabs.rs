@@ -1221,3 +1221,125 @@ fn convert(key: KeyEvent) -> Option<Key> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use super::super::test_util::{ctrl, key, keys, press, select, setup, wait_picker};
+
+    #[test]
+    fn text_files_open_in_code_tabs_and_unsaved_changes_block_quitting() {
+        let (dir, mut app, _rx) = setup("code");
+        app.code.no_state = true;
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.code.active, Some(0));
+        let labels = app.tab_labels();
+        assert_eq!(labels.len(), 2);
+        assert!(labels[1].active && labels[1].title.ends_with("a.txt"));
+        // x deletes in the editor; Alt+1 goes back to liman, where q must not lose the change.
+        keys(&mut app, "x");
+        assert!(
+            app.tab_labels()[1].has_shell,
+            "the dot marks unsaved changes"
+        );
+        app.handle(key(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert_eq!(app.code.active, None);
+        app.run_action(crate::app::Action::Quit);
+        assert!(app.running);
+        assert_eq!(app.code.active, Some(0), "the unsaved tab is shown");
+        // :q! drops the change and closes the tab.
+        keys(&mut app, ":q!");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.code.tabs.is_empty() && app.code.active.is_none());
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_code_tab_splits_into_two_windows_with_a_file_each() {
+        let (dir, mut app, rx) = setup("split");
+        app.code.no_state = true;
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Enter);
+        // Space | : a new window on the right that asks for its file.
+        keys(&mut app, " |");
+        wait_picker(&mut app, &rx);
+        keys(&mut app, "b.txt");
+        press(&mut app, KeyCode::Enter);
+        let tab = &app.code.tabs[0];
+        let name = |e: &fener_core::Editor| e.doc.path().unwrap().file_name().unwrap().to_owned();
+        assert_eq!(name(&tab.editor), "b.txt");
+        assert_eq!(name(&tab.other.as_ref().unwrap().editor), "a.txt");
+        // Ctrl+H: back to the left window; :q closes it, the right one stays.
+        ctrl(&mut app, 'h');
+        assert_eq!(name(&app.code.tabs[0].editor), "a.txt");
+        keys(&mut app, ":q");
+        press(&mut app, KeyCode::Enter);
+        let tab = &app.code.tabs[0];
+        assert!(tab.other.is_none());
+        assert_eq!(name(&tab.editor), "b.txt");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn both_windows_of_a_split_share_one_file() {
+        let (dir, mut app, rx) = setup("shared");
+        app.code.no_state = true;
+        let text = |e: &fener_core::Editor| e.doc.rope.to_string();
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Enter);
+        // Space | and Esc: the new window keeps the same file, as Vim's :vsplit.
+        keys(&mut app, " |");
+        wait_picker(&mut app, &rx);
+        keys(&mut app, "\x1b");
+        assert_eq!(text(&app.code.tabs[0].editor), "a");
+        // A line typed above on the right, seen on the left.
+        keys(&mut app, "OX\x1b");
+        ctrl(&mut app, 'h');
+        let tab = &app.code.tabs[0];
+        assert_eq!(text(&tab.editor), "X\na");
+        assert!(tab.editor.doc.is_modified());
+        // The left cursor was on "a" and moved down with it.
+        assert_eq!(tab.editor.cursor, 2);
+        // :q here closes this window only; nothing is lost.
+        keys(&mut app, ":q");
+        press(&mut app, KeyCode::Enter);
+        let tab = &app.code.tabs[0];
+        assert!(tab.other.is_none());
+        assert_eq!(text(&tab.editor), "X\na");
+        assert_eq!(tab.editor.doc.path().unwrap().file_name().unwrap(), "a.txt");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_window_that_opens_another_file_leaves_the_shared_one_to_the_other() {
+        let (dir, mut app, rx) = setup("unshare");
+        app.code.no_state = true;
+        select(&mut app, "a.txt");
+        press(&mut app, KeyCode::Enter);
+        keys(&mut app, " |");
+        wait_picker(&mut app, &rx);
+        keys(&mut app, "\x1b");
+        keys(&mut app, "iX\x1b");
+        // Unsaved, yet this window may show b.txt: the left window still has a.txt.
+        keys(&mut app, " ");
+        keys(&mut app, " ");
+        wait_picker(&mut app, &rx);
+        keys(&mut app, "b.txt");
+        press(&mut app, KeyCode::Enter);
+        let tab = &app.code.tabs[0];
+        let other = &tab.other.as_ref().unwrap().editor;
+        assert_eq!(tab.editor.doc.path().unwrap().file_name().unwrap(), "b.txt");
+        assert_eq!(other.doc.rope.to_string(), "Xa");
+        assert!(other.doc.is_modified());
+        // Closing the tab now would lose the left window's change: it asks.
+        keys(&mut app, " ");
+        app.close_code_tab(0, false);
+        assert_eq!(app.code.tabs.len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

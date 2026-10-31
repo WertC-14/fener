@@ -421,64 +421,11 @@ mod tests {
     use super::*;
     use crate::app::Listing;
     use crate::event::AppEvent;
-    use liman_core::Places;
-    use ratatui::crossterm::event::{Event, KeyEventKind, KeyEventState, KeyModifiers};
+    use ratatui::crossterm::event::{Event, KeyModifiers};
     use std::fs;
     use std::path::Path;
-    use std::sync::mpsc::{self, Receiver};
-    use std::time::Duration;
 
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
-        AppEvent::Input(Event::Key(KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        }))
-    }
-
-    fn press(app: &mut App, code: KeyCode) {
-        app.handle(key(code, KeyModifiers::NONE));
-    }
-
-    fn ctrl(app: &mut App, c: char) {
-        app.handle(key(KeyCode::Char(c), KeyModifiers::CONTROL));
-    }
-
-    /// Feeds worker events to the app until `done` holds (listing loaded, job finished...).
-    fn pump(app: &mut App, rx: &Receiver<AppEvent>, done: impl Fn(&App) -> bool) {
-        while !done(app) {
-            let ev = rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("worker event");
-            app.handle(ev);
-        }
-    }
-
-    fn loaded(app: &App) -> bool {
-        matches!(app.tab.listing, Listing::Ready(_))
-            && app.job.is_none()
-            && app.loading_path.is_none()
-    }
-
-    /// Temp home with a.txt, b.txt and dest/; the app shows it with a private trash.
-    fn setup(tag: &str) -> (PathBuf, App, Receiver<AppEvent>) {
-        let dir = std::env::temp_dir().join(format!("liman-app-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("dest")).unwrap();
-        fs::write(dir.join("a.txt"), "a").unwrap();
-        fs::write(dir.join("b.txt"), "b").unwrap();
-        let (tx, rx) = mpsc::channel();
-        let mut app = App::new(dir.clone(), Places::from_user_dirs("", &dir), tx);
-        app.trash_dir = dir.join(".trash");
-        pump(&mut app, &rx, loaded);
-        (dir, app, rx)
-    }
-
-    fn select(app: &mut App, name: &str) {
-        let row = app.visible_entries().position(|e| e.name == name).unwrap();
-        app.tab.table.select(Some(row));
-    }
+    use super::super::test_util::{ctrl, key, loaded, press, pump, select, setup};
 
     #[test]
     fn copy_and_paste_into_another_folder() {
@@ -739,37 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn text_files_open_in_code_tabs_and_unsaved_changes_block_quitting() {
-        let (dir, mut app, _rx) = setup("code");
-        app.code.no_state = true;
-        select(&mut app, "a.txt");
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.code.active, Some(0));
-        let labels = app.tab_labels();
-        assert_eq!(labels.len(), 2);
-        assert!(labels[1].active && labels[1].title.ends_with("a.txt"));
-        // x deletes in the editor; Alt+1 goes back to liman, where q must not lose the change.
-        app.handle(key(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert!(
-            app.tab_labels()[1].has_shell,
-            "the dot marks unsaved changes"
-        );
-        app.handle(key(KeyCode::Char('1'), KeyModifiers::ALT));
-        assert_eq!(app.code.active, None);
-        app.run_action(crate::app::Action::Quit);
-        assert!(app.running);
-        assert_eq!(app.code.active, Some(0), "the unsaved tab is shown");
-        // :q! drops the change and closes the tab.
-        for c in ":q!".chars() {
-            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.code.tabs.is_empty() && app.code.active.is_none());
-        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn the_folder_time_check_catches_what_the_watcher_missed_and_names_it() {
         let (dir, mut app, rx) = setup("tick");
         app.message = None;
@@ -806,136 +722,5 @@ mod tests {
         assert!(file.exists(), "copied, not moved");
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&elsewhere).unwrap();
-    }
-
-    #[test]
-    fn a_code_tab_splits_into_two_windows_with_a_file_each() {
-        let (dir, mut app, rx) = setup("split");
-        app.code.no_state = true;
-        select(&mut app, "a.txt");
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        // Space | : a new window on the right that asks for its file.
-        for c in [' ', '|'] {
-            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        pump(&mut app, &rx, |a| {
-            a.code.tabs[0]
-                .editor
-                .picker
-                .as_ref()
-                .is_some_and(|p| !p.loading)
-        });
-        for c in "b.txt".chars() {
-            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        let tab = &app.code.tabs[0];
-        let name = |e: &fener_core::Editor| e.doc.path().unwrap().file_name().unwrap().to_owned();
-        assert_eq!(name(&tab.editor), "b.txt");
-        assert_eq!(name(&tab.other.as_ref().unwrap().editor), "a.txt");
-        // Ctrl+H: back to the left window; :q closes it, the right one stays.
-        app.handle(key(KeyCode::Char('h'), KeyModifiers::CONTROL));
-        assert_eq!(name(&app.code.tabs[0].editor), "a.txt");
-        for c in ":q".chars() {
-            app.handle(key(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        let tab = &app.code.tabs[0];
-        assert!(tab.other.is_none());
-        assert_eq!(name(&tab.editor), "b.txt");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn both_windows_of_a_split_share_one_file() {
-        let (dir, mut app, rx) = setup("shared");
-        app.code.no_state = true;
-        let keys = |app: &mut App, text: &str| {
-            for c in text.chars() {
-                let code = if c == '\x1b' {
-                    KeyCode::Esc
-                } else {
-                    KeyCode::Char(c)
-                };
-                app.handle(key(code, KeyModifiers::NONE));
-            }
-        };
-        let text = |e: &fener_core::Editor| e.doc.rope.to_string();
-        select(&mut app, "a.txt");
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        // Space | and Esc: the new window keeps the same file, as Vim's :vsplit.
-        keys(&mut app, " |");
-        pump(&mut app, &rx, |a| {
-            a.code.tabs[0]
-                .editor
-                .picker
-                .as_ref()
-                .is_some_and(|p| !p.loading)
-        });
-        keys(&mut app, "\x1b");
-        assert_eq!(text(&app.code.tabs[0].editor), "a");
-        // A line typed above on the right, seen on the left.
-        keys(&mut app, "OX\x1b");
-        app.handle(key(KeyCode::Char('h'), KeyModifiers::CONTROL));
-        let tab = &app.code.tabs[0];
-        assert_eq!(text(&tab.editor), "X\na");
-        assert!(tab.editor.doc.is_modified());
-        // The left cursor was on "a" and moved down with it.
-        assert_eq!(tab.editor.cursor, 2);
-        // :q here closes this window only; nothing is lost.
-        keys(&mut app, ":q");
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        let tab = &app.code.tabs[0];
-        assert!(tab.other.is_none());
-        assert_eq!(text(&tab.editor), "X\na");
-        assert_eq!(tab.editor.doc.path().unwrap().file_name().unwrap(), "a.txt");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_window_that_opens_another_file_leaves_the_shared_one_to_the_other() {
-        let (dir, mut app, rx) = setup("unshare");
-        app.code.no_state = true;
-        let keys = |app: &mut App, text: &str| {
-            for c in text.chars() {
-                let code = if c == '\x1b' {
-                    KeyCode::Esc
-                } else {
-                    KeyCode::Char(c)
-                };
-                app.handle(key(code, KeyModifiers::NONE));
-            }
-        };
-        let wait_picker = |app: &mut App| {
-            pump(app, &rx, |a| {
-                a.code.tabs[0]
-                    .editor
-                    .picker
-                    .as_ref()
-                    .is_some_and(|p| !p.loading)
-            })
-        };
-        select(&mut app, "a.txt");
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        keys(&mut app, " |");
-        wait_picker(&mut app);
-        keys(&mut app, "\x1b");
-        keys(&mut app, "iX\x1b");
-        // Unsaved, yet this window may show b.txt: the left window still has a.txt.
-        keys(&mut app, " ");
-        keys(&mut app, " ");
-        wait_picker(&mut app);
-        keys(&mut app, "b.txt");
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-        let tab = &app.code.tabs[0];
-        let other = &tab.other.as_ref().unwrap().editor;
-        assert_eq!(tab.editor.doc.path().unwrap().file_name().unwrap(), "b.txt");
-        assert_eq!(other.doc.rope.to_string(), "Xa");
-        assert!(other.doc.is_modified());
-        // Closing the tab now would lose the left window's change: it asks.
-        keys(&mut app, " ");
-        app.close_code_tab(0, false);
-        assert_eq!(app.code.tabs.len(), 1);
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

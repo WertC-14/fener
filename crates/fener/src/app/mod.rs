@@ -14,6 +14,8 @@ mod search;
 mod settings;
 mod tabs;
 mod terminal_mode;
+#[cfg(test)]
+mod test_util;
 
 pub use actions::{Action, HELP, Menu};
 pub use code_tabs::CodeTabs;
