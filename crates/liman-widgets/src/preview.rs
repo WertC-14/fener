@@ -206,27 +206,42 @@ impl TextView<'_> {
         // Comments and code fences that opened above the first line on screen.
         let above = lines[..start].iter().map(String::as_str);
         let mut state = highlight::state_after(self.lang, above);
-        let mut in_code = state.in_fence();
         let height = usize::from(area.height);
+        if self.formatted {
+            // Markdown: a paragraph's lines are joined, so rows do not map to lines one by one.
+            let (rows, used) =
+                crate::markdown::layout(&lines[start..], state.in_fence(), width, height);
+            let mut out: Vec<Line> = rows
+                .into_iter()
+                .take(height)
+                .map(|row| {
+                    let mut spans = vec![Span::raw(" ")];
+                    spans.extend(row.spans);
+                    Line::from(spans)
+                })
+                .collect();
+            let last = start + used;
+            if self.more && last == lines.len() && out.len() < height {
+                out.push(Line::from("…").fg(theme::dim()));
+            }
+            Paragraph::new(out).render(area, buf);
+            return (start + 1, last, lines.len());
+        }
         let mut out: Vec<Line> = Vec::with_capacity(height);
         let mut last = start;
         for (i, line) in lines.iter().enumerate().skip(start) {
             if out.len() >= height {
                 break;
             }
-            let spans = if self.formatted {
-                crate::markdown::line(line, &mut in_code, width)
-            } else {
-                highlight::line_spans(self.lang, line, &mut state)
-            };
+            let spans = highlight::line_spans(self.lang, line, &mut state);
             for (k, part) in wrap(spans, width).into_iter().enumerate() {
                 if out.len() >= height {
                     break;
                 }
-                let number = match (self.formatted, k) {
-                    (true, _) => " ".to_string(),
-                    (false, 0) => format!("{:>digits$} │ ", i + 1),
-                    (false, _) => format!("{:>digits$} │ ", ""),
+                let number = if k == 0 {
+                    format!("{:>digits$} │ ", i + 1)
+                } else {
+                    format!("{:>digits$} │ ", "")
                 };
                 let mut row = vec![Span::raw(number).fg(theme::border())];
                 row.extend(part);
