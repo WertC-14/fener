@@ -68,7 +68,10 @@ fn main() -> io::Result<()> {
     let arg = arg.map(|p| here.join(p));
     let (cwd, file) = match arg {
         Some(p) if p.is_dir() => (p, None),
-        Some(p) => (p.parent().map_or(here.clone(), PathBuf::from), Some(p)),
+        Some(p) => (
+            p.parent().map_or_else(|| here.clone(), PathBuf::from),
+            Some(p),
+        ),
         None => (here, None),
     };
     let home = std::env::var_os("HOME").map_or_else(|| cwd.clone(), PathBuf::from);

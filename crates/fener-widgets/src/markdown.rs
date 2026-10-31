@@ -1,4 +1,4 @@
-//! The Markdown reader (`Space u m`): the file shown formatted instead of as source. Headings
+//! The Markdown reader (`Space r`, Ctrl+E): the file shown formatted instead of as source. Headings
 //! without `#`, bullets, task boxes, quotes, rules, framed code blocks, inline `code`, **bold**,
 //! *italic* and [links](…) without their markers, wrapped at word boundaries. Ported from
 //! liman's preview (`liman-widgets/src/markdown.rs`) to fener's theme.

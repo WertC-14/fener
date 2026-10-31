@@ -543,7 +543,7 @@ fn strip_snippet(text: &str) -> String {
             }
             '$' if chars.peek() == Some(&'{') => {
                 chars.next();
-                while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                while chars.peek().is_some_and(char::is_ascii_digit) {
                     chars.next();
                 }
                 if chars.peek() == Some(&':') {
@@ -796,7 +796,7 @@ mod tests {
     /// Talks to a real rust-analyzer when it is installed:
     /// `cargo test -p fener-core lsp -- --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "needs rust-analyzer on PATH"]
     fn rust_analyzer_reports_an_error() {
         let dir = std::env::temp_dir().join(format!("fener-lsp-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -833,7 +833,7 @@ mod tests {
 
     /// `cargo test -p fener-core hover_from -- --ignored --nocapture`
     #[test]
-    #[ignore]
+    #[ignore = "needs rust-analyzer on PATH"]
     fn hover_from_rust_analyzer() {
         let dir = std::env::temp_dir().join(format!("fener-hover-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();

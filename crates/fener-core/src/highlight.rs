@@ -342,7 +342,7 @@ mod tests {
 mod timing {
     /// `cargo test --release -p fener-core timing -- --ignored --nocapture`
     #[test]
-    #[ignore]
+    #[ignore = "timing benchmark, run by hand"]
     fn big_file() {
         let text = include_str!("editor.rs");
         for round in 0..3 {

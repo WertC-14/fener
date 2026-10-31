@@ -328,7 +328,7 @@ impl App {
 
     /// Before liman quits: the first code tab with unsaved changes, shown with a warning.
     pub(super) fn unsaved_code_tab(&mut self) -> bool {
-        let Some(i) = self.code.tabs.iter().position(|t| t.is_modified()) else {
+        let Some(i) = self.code.tabs.iter().position(CodeTab::is_modified) else {
             return false;
         };
         self.code.active = Some(i);

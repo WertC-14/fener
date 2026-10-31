@@ -319,7 +319,7 @@ pub struct Editor {
     /// The folder tree on the left (`Space e`), and whether keys go to it.
     pub tree: Option<Tree>,
     pub tree_focus: bool,
-    /// Markdown shown formatted (`Space u m`); Markdown files open this way. `reader_top`:
+    /// Markdown shown formatted (`Space r`, Ctrl+E); Markdown files open this way. `reader_top`:
     /// the first source line on screen.
     pub reader: bool,
     pub reader_top: usize,
