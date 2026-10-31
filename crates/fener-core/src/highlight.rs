@@ -344,7 +344,21 @@ mod timing {
     #[test]
     #[ignore = "timing benchmark, run by hand"]
     fn big_file() {
-        let text = include_str!("editor.rs");
+        // The editor's sources, about 3300 lines of Rust together.
+        let text = [
+            include_str!("editor/mod.rs"),
+            include_str!("editor/grammar.rs"),
+            include_str!("editor/normal.rs"),
+            include_str!("editor/commands.rs"),
+            include_str!("editor/language.rs"),
+            include_str!("editor/insert.rs"),
+            include_str!("editor/visual.rs"),
+            include_str!("editor/cmdline.rs"),
+            include_str!("editor/panes.rs"),
+            include_str!("editor/tests.rs"),
+        ]
+        .concat();
+        let text = text.as_str();
         for round in 0..3 {
             let start = std::time::Instant::now();
             let spans = super::highlight(super::Grammar::Rust, text).unwrap();
